@@ -7,7 +7,7 @@ A fully local, open-source long-form-video to vertical-shorts pipeline.
 
 What it does
 ------------
-1. Probes and validates a local MP4/MKV file with FFprobe.
+1. Probes and validates a local MP4/MKV file or a YouTube URL with FFprobe.
 2. Extracts mono 16 kHz audio and measures a 50 ms RMS energy envelope.
 3. Transcribes speech locally with faster-whisper (word-level timestamps).
 4. Builds sentence/clause units and scores every cohesive 30/45/60 second
@@ -27,6 +27,10 @@ Usage
 -----
     python app.py
     python app.py --cli --input /path/to/video.mp4 --duration 45 --clips 3
+    python app.py --cli --youtube "https://www.youtube.com/watch?v=..." --clips 2
+
+YouTube mode resolves a direct stream with yt-dlp and only fetches the audio
+plus the selected video ranges; no full video file is saved to disk.
 
 Requires FFmpeg/FFprobe on PATH (or supplied with --ffmpeg/--ffprobe).
 """
@@ -172,13 +176,21 @@ class AudioEnergy:
 
 @dataclass
 class MediaInfo:
-    path: Path
+    # Local path or a direct HTTP(S) media URL resolved from YouTube.
+    path: str | Path
     duration: float
     width: int
     height: int
     video_codec: str
     audio_codec: str
     has_audio: bool
+    # Set for YouTube jobs.  ``audio_url`` is separate when YouTube only
+    # exposes DASH video/audio streams (the common case today).
+    source_url: str | None = None
+    audio_url: str | None = None
+    http_headers: dict[str, str] = field(default_factory=dict)
+    audio_headers: dict[str, str] = field(default_factory=dict)
+    display_name: str = ""
 
 
 @dataclass
@@ -235,7 +247,7 @@ class ClipResult:
 @dataclass
 class JobResult:
     job_id: str
-    source: Path
+    source: str | Path
     output_dir: Path
     manifest_path: Path
     clips: list[ClipResult]
@@ -243,6 +255,7 @@ class JobResult:
     language: str
     language_probability: float
     backend: str
+    source_label: str = ""
 
     def to_summary(self) -> dict[str, Any]:
         return {
@@ -306,6 +319,26 @@ def _ffmpeg_base(ffmpeg: str) -> list[str]:
     return [ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "error"]
 
 
+YOUTUBE_URL_RE = re.compile(
+    r"^(?:https?://)?(?:www\.|m\.)?"
+    r"(?:youtube\.com/(?:watch\?|shorts/|embed/|live/|replay/)|youtu\.be/)",
+    re.IGNORECASE,
+)
+
+
+def is_youtube_url(value: str) -> bool:
+    """Return True for watch/shorts/embed/live/youtu.be links."""
+    return bool(YOUTUBE_URL_RE.match((value or "").strip()))
+
+
+def _header_option(headers: dict[str, str] | None) -> list[str]:
+    """Render HTTP headers in the format FFmpeg/FFprobe expect."""
+    if not headers:
+        return []
+    text = "".join(f"{key}: {value}\r\n" for key, value in headers.items())
+    return ["-headers", text]
+
+
 def _tail(text: str, limit: int = 1800) -> str:
     text = (text or "").strip()
     return text[-limit:] if len(text) > limit else text
@@ -347,17 +380,29 @@ def run_process(
     return result
 
 
-def probe_media(path: Path, ffprobe: str) -> MediaInfo:
-    """Validate the container and return basic stream information."""
-    if not path.exists():
-        raise ClipperError(f"Input file does not exist: {path}")
-    if not path.is_file():
-        raise ClipperError(f"Input path is not a file: {path}")
+def probe_media(
+    source: str | Path,
+    ffprobe: str,
+    *,
+    headers: dict[str, str] | None = None,
+    display_name: str | None = None,
+    source_url: str | None = None,
+    audio_url: str | None = None,
+    audio_headers: dict[str, str] | None = None,
+) -> MediaInfo:
+    """Validate a local file or direct media URL and return stream information."""
+    is_local = isinstance(source, Path)
+    if is_local:
+        if not source.exists():
+            raise ClipperError(f"Input file does not exist: {source}")
+        if not source.is_file():
+            raise ClipperError(f"Input path is not a file: {source}")
 
-    cmd = [
-        ffprobe, "-v", "error", "-print_format", "json",
-        "-show_format", "-show_streams", str(path),
-    ]
+    cmd = (
+        [ffprobe, "-v", "error"]
+        + _header_option(headers)
+        + ["-print_format", "json", "-show_format", "-show_streams", str(source)]
+    )
     result = run_process(cmd, "Reading video metadata")
     try:
         payload = json.loads(result.stdout or "{}")
@@ -374,7 +419,7 @@ def probe_media(path: Path, ffprobe: str) -> MediaInfo:
         raise ClipperError(
             "No video stream found. Please choose a valid MP4, MKV, MOV, or WebM file."
         )
-    if audio is None:
+    if audio is None and not audio_url:
         raise ClipperError(
             "No audio stream found. Clip selection and captions require speech audio."
         )
@@ -382,7 +427,7 @@ def probe_media(path: Path, ffprobe: str) -> MediaInfo:
     duration_raw = (
         payload.get("format", {}).get("duration")
         or video.get("duration")
-        or audio.get("duration")
+        or (audio or {}).get("duration")
     )
     try:
         duration = float(duration_raw)
@@ -411,21 +456,163 @@ def probe_media(path: Path, ffprobe: str) -> MediaInfo:
     if abs(rotation) in (90, 270):
         width, height = height, width
 
+    label = display_name or (source.name if is_local else str(source))
+    audio_codec = str((audio or {}).get("codec_name") or "unknown")
+    if audio_url and audio is None:
+        # The probed video-only DASH stream has no audio; the separate audio
+        # URL is an AAC/m4a stream chosen by the YouTube resolver.
+        audio_codec = "aac"
     return MediaInfo(
-        path=path.resolve(),
+        path=source.resolve() if is_local else str(source),
         duration=duration,
         width=width,
         height=height,
         video_codec=str(video.get("codec_name") or "unknown"),
-        audio_codec=str(audio.get("codec_name") or "unknown"),
+        audio_codec=audio_codec,
         has_audio=True,
+        source_url=source_url,
+        audio_url=audio_url,
+        http_headers=dict(headers or {}),
+        audio_headers=dict(audio_headers or {}),
+        display_name=str(label),
     )
+
+
+def _has_stream(fmt: dict[str, Any], kind: str) -> bool:
+    value = fmt.get(kind)
+    return value is not None and str(value).lower() != "none"
+
+
+def _is_direct_format(fmt: dict[str, Any]) -> bool:
+    protocol = str(fmt.get("protocol") or "")
+    return ("http" in protocol) and "m3u8" not in protocol and bool(fmt.get("url"))
+
+
+def _format_headers(fmt: dict[str, Any], info: dict[str, Any]) -> dict[str, str]:
+    headers = dict(fmt.get("http_headers") or info.get("http_headers") or {})
+    headers.setdefault("User-Agent", "Mozilla/5.0")
+    headers.setdefault("Referer", "https://www.youtube.com/")
+    return headers
+
+
+def _video_format_rank(fmt: dict[str, Any]) -> tuple[Any, ...]:
+    height = min(int(fmt.get("height") or 0), 1080)
+    codec = str(fmt.get("vcodec") or "")
+    return (
+        height,
+        codec.startswith(("avc1", "h264")),
+        float(fmt.get("fps") or 0),
+        float(fmt.get("tbr") or 0),
+    )
+
+
+def _audio_format_rank(fmt: dict[str, Any]) -> tuple[Any, ...]:
+    codec = str(fmt.get("acodec") or "")
+    format_id = str(fmt.get("format_id") or "").lower()
+    return (
+        "-drc" not in format_id,
+        "mp4a" in codec or str(fmt.get("ext") or "") == "m4a",
+        float(fmt.get("tbr") or 0),
+    )
+
+
+def _pick_youtube_formats(
+    info: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Pick seekable direct URLs, preferring one stream when YouTube offers it."""
+    formats = [
+        fmt for fmt in (info.get("formats") or []) if _is_direct_format(fmt)
+    ]
+    if not formats:
+        raise ClipperError(
+            "YouTube did not expose a direct media stream for this video. "
+            "Try a different, non-live video."
+        )
+
+    progressive = [
+        fmt for fmt in formats
+        if _has_stream(fmt, "vcodec") and _has_stream(fmt, "acodec")
+    ]
+    if progressive:
+        return max(progressive, key=_video_format_rank), None
+
+    videos = [fmt for fmt in formats if _has_stream(fmt, "vcodec")]
+    audios = [
+        fmt for fmt in formats
+        if _has_stream(fmt, "acodec") and not _has_stream(fmt, "vcodec")
+    ]
+    if not videos or not audios:
+        raise ClipperError(
+            "This YouTube video only exposes incomplete streams. "
+            "Try a standard uploaded video rather than a live stream."
+        )
+    return max(videos, key=_video_format_rank), max(audios, key=_audio_format_rank)
+
+
+def resolve_youtube_source(url: str, ffprobe: str) -> MediaInfo:
+    """Resolve a YouTube URL into direct stream URLs without downloading it."""
+    try:
+        import yt_dlp  # type: ignore
+    except Exception as exc:
+        raise ClipperError(
+            "YouTube support needs the free `yt-dlp` package. Install it with:\n"
+            "  pip install -r requirements.txt\n"
+            f"Details: {exc}"
+        ) from exc
+
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as exc:
+        raise ClipperError(
+            f"Could not read the YouTube link.\n\n{_tail(str(exc), 1200)}\n\n"
+            "Check the URL and your internet connection. If YouTube blocks this "
+            "network, update yt-dlp with `pip install -U yt-dlp`."
+        ) from exc
+    if not info or info.get("_type") == "playlist":
+        raise ClipperError(
+            "This looks like a playlist. Paste a single YouTube video URL instead."
+        )
+    if not info.get("duration"):
+        raise ClipperError("Live streams are not supported. Use a finished video.")
+
+    video_fmt, audio_fmt = _pick_youtube_formats(info)
+    video_headers = _format_headers(video_fmt, info)
+    audio_headers = _format_headers(audio_fmt, info) if audio_fmt else {}
+    title = str(info.get("title") or info.get("id") or "youtube-video")
+    webpage_url = str(info.get("webpage_url") or url)
+
+    try:
+        media = probe_media(
+            str(video_fmt["url"]),
+            ffprobe,
+            headers=video_headers,
+            display_name=title,
+            source_url=webpage_url,
+            audio_url=str(audio_fmt["url"]) if audio_fmt else None,
+            audio_headers=audio_headers,
+        )
+    except FFmpegError as exc:
+        raise ClipperError(
+            f"Could not probe the resolved YouTube stream.\n\n{exc}"
+        ) from exc
+    if media.duration <= 0.5:
+        media.duration = float(info["duration"])
+    return media
 
 
 def extract_audio(media: MediaInfo, wav_path: Path, ffmpeg: str) -> None:
     """Extract mono 16-bit PCM at 16 kHz for Whisper and energy analysis."""
-    cmd = _ffmpeg_base(ffmpeg) + [
-        "-i", str(media.path),
+    audio_source = media.audio_url or media.path
+    headers = media.audio_headers if media.audio_url else media.http_headers
+    cmd = _ffmpeg_base(ffmpeg) + _header_option(headers) + [
+        "-i", str(audio_source),
         "-map", "0:a:0",
         "-vn",
         "-ac", "1",
@@ -1292,7 +1479,7 @@ def analyze_face_path(
     shutil.rmtree(frames_dir, ignore_errors=True)
     frames_dir.mkdir(parents=True, exist_ok=True)
     sample_fps = _effective_face_sample_fps(settings.face_sample_fps, duration)
-    cmd = _ffmpeg_base(ffmpeg) + [
+    cmd = _ffmpeg_base(ffmpeg) + _header_option(media.http_headers) + [
         "-ss", f"{max(0.0, start):.3f}",
         "-i", str(media.path),
         "-t", f"{duration:.3f}",
@@ -1571,13 +1758,22 @@ def _render_once(
         if duration > 0.25
         else "anull"
     )
-    cmd = _ffmpeg_base(ffmpeg) + [
+    inputs = _header_option(media.http_headers) + [
         "-ss", f"{candidate.start:.3f}",
         "-i", str(media.path),
+    ]
+    audio_input = 0
+    if media.audio_url and str(media.audio_url) != str(media.path):
+        inputs += _header_option(media.audio_headers) + [
+            "-ss", f"{candidate.start:.3f}",
+            "-i", media.audio_url,
+        ]
+        audio_input = 1
+    cmd = _ffmpeg_base(ffmpeg) + inputs + [
         "-t", f"{duration:.3f}",
         "-filter_complex_script", str(filter_script),
         "-map", "[v]",
-        "-map", "0:a:0",
+        "-map", f"{audio_input}:a:0",
         "-af", audio_filter,
         "-c:v", "libx264",
         "-preset", "veryfast",
@@ -1761,11 +1957,15 @@ def create_clips(
     progress: Callable[[float, str], None] | None = None,
 ) -> JobResult:
     """Run the complete probe → transcribe → score → render pipeline."""
-    source_path = Path(source).expanduser()
-    if not source_path.is_absolute():
-        source_path = (Path.cwd() / source_path).resolve()
-    else:
-        source_path = source_path.resolve()
+    source_text = str(source).strip()
+    youtube_mode = is_youtube_url(source_text)
+    source_path: Path | None = None
+    if not youtube_mode:
+        source_path = Path(source_text).expanduser()
+        if not source_path.is_absolute():
+            source_path = (Path.cwd() / source_path).resolve()
+        else:
+            source_path = source_path.resolve()
 
     if settings.target_duration not in SUPPORTED_DURATIONS:
         raise ClipperError(
@@ -1786,14 +1986,20 @@ def create_clips(
         raise ClipperError(f"Cannot write to output directory {output_dir}: {exc}") from exc
 
     ffmpeg, ffprobe = ensure_ffmpeg(ffmpeg_bin, ffprobe_bin)
-    if progress:
-        progress(0.02, "Validating video…")
-    try:
-        media = probe_media(source_path, ffprobe)
-    except FFmpegError as exc:
-        raise ClipperError(
-            f"Could not read {source_path.name}. The file may be corrupted or unsupported.\n\n{exc}"
-        ) from exc
+    if youtube_mode:
+        if progress:
+            progress(0.01, "Resolving YouTube stream…")
+        media = resolve_youtube_source(source_text, ffprobe)
+    else:
+        if progress:
+            progress(0.02, "Validating video…")
+        try:
+            media = probe_media(source_path, ffprobe)  # type: ignore[arg-type]
+        except FFmpegError as exc:
+            raise ClipperError(
+                f"Could not read {source_path.name if source_path else source_text}. "
+                f"The file may be corrupted or unsupported.\n\n{exc}"
+            ) from exc
 
     warnings: list[str] = []
     if media.duration < 3.0:
@@ -1805,8 +2011,8 @@ def create_clips(
         )
 
     job_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-    safe_stem = _safe_stem(source_path.stem)
-    LOG.info("Job %s: %s", job_id, media.path)
+    safe_stem = _safe_stem(source_path.stem if source_path else media.display_name)
+    LOG.info("Job %s: %s", job_id, media.source_url or media.path)
 
     with tempfile.TemporaryDirectory(prefix="viral-clipper-") as tmp:
         work_root = Path(tmp)
@@ -1894,7 +2100,7 @@ def create_clips(
             manifest = {
                 "job_id": job_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
-                "source": str(media.path),
+                "source": media.source_url or str(media.path),
                 "source_duration": round(media.duration, 3),
                 "source_dimensions": [media.width, media.height],
                 "settings": {
@@ -1958,7 +2164,7 @@ def create_clips(
         progress(1.0, "Done.")
     return JobResult(
         job_id=job_id,
-        source=media.path,
+        source=media.source_url or media.path,
         output_dir=output_dir,
         manifest_path=manifest_path,
         clips=clips,
@@ -1966,6 +2172,7 @@ def create_clips(
         language=transcript.language,
         language_probability=transcript.language_probability,
         backend=transcript.backend,
+        source_label=source_path.stem if source_path else media.display_name,
     )
 
 
@@ -1987,7 +2194,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--cli", action="store_true", help="Run the command-line pipeline.")
-    parser.add_argument("--input", type=Path, help="Local MP4/MKV/MOV/WebM path (CLI mode).")
+    parser.add_argument(
+        "--input", type=str,
+        help="Local MP4/MKV/MOV/WebM path or a YouTube URL (CLI mode).",
+    )
+    parser.add_argument(
+        "--youtube", type=str, default=None,
+        help="YouTube video URL (CLI mode); an alias for --input with a URL.",
+    )
     parser.add_argument(
         "--duration", type=int, choices=SUPPORTED_DURATIONS, default=45,
         help="Target highlight duration in seconds.",
@@ -2044,8 +2258,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def run_cli(args: argparse.Namespace) -> int:
-    if not args.input:
-        print("error: --input is required with --cli", file=sys.stderr)
+    source_value = (args.youtube or args.input or "").strip()
+    if not source_value:
+        print(
+            "error: --input PATH or --youtube URL is required with --cli",
+            file=sys.stderr,
+        )
         return 2
     settings = ClipSettings(
         target_duration=args.duration,
@@ -2062,7 +2280,7 @@ def run_cli(args: argparse.Namespace) -> int:
     )
     try:
         result = create_clips(
-            args.input,
+            source_value,
             settings,
             ffmpeg_bin=args.ffmpeg,
             ffprobe_bin=args.ffprobe,
@@ -2104,7 +2322,15 @@ def _ui_environment_banner() -> str:
         if cuda_count > 0
         else "ℹ️ No CUDA GPU detected — faster-whisper will use CPU (int8) automatically."
     )
-    return f"{media_status}  \n{gpu_status}"
+    try:
+        import yt_dlp  # type: ignore
+
+        youtube_status = f"✅ YouTube links supported (yt-dlp {yt_dlp.version.__version__})."
+    except Exception:
+        youtube_status = (
+            "❌ YouTube links need yt-dlp. Install it with `pip install -r requirements.txt`."
+        )
+    return f"{media_status}  \n{gpu_status}  \n{youtube_status}"
 
 
 def _ui_error_message(exc: Exception) -> str:
@@ -2173,6 +2399,16 @@ def launch_ui(args: argparse.Namespace) -> int:
                     label="…or paste a local file path",
                     placeholder="/home/you/Videos/podcast.mp4",
                     info="A local path takes precedence over the uploaded file.",
+                    lines=1,
+                )
+                youtube_url = gr.Textbox(
+                    label="…or paste a YouTube URL",
+                    placeholder="https://www.youtube.com/watch?v=...",
+                    info=(
+                        "Only the audio and the selected video ranges are fetched — "
+                        "the full video is never saved. This takes precedence over "
+                        "the local path and upload."
+                    ),
                     lines=1,
                 )
                 gr.Markdown(
@@ -2246,8 +2482,8 @@ def launch_ui(args: argparse.Namespace) -> int:
                     f"`{output_dir}`."
                 )
                 status = gr.Markdown(
-                    "Ready when you are. Upload a video or paste a local path "
-                    "and press **Find & render highlights**."
+                    "Ready when you are. Upload a video, paste a local path, or "
+                    "paste a YouTube URL, then press **Find & render highlights**."
                 )
                 gallery = gr.Gallery(
                     label="Preview clips",
@@ -2263,6 +2499,7 @@ def launch_ui(args: argparse.Namespace) -> int:
         def handle_run(
             uploaded_file: Any,
             local_file_path: str,
+            youtube_link: str,
             target_duration: int,
             requested_clips: int,
             whisper_model: str,
@@ -2274,14 +2511,18 @@ def launch_ui(args: argparse.Namespace) -> int:
             ollama_name: str,
             progress: Any = gr.Progress(),
         ) -> tuple[str, list[tuple[str, str]], list[str], str]:
+            youtube_value = (youtube_link or "").strip()
             local_value = (local_file_path or "").strip()
-            if local_value:
-                chosen: Path | str = Path(local_value).expanduser()
+            if youtube_value:
+                chosen: Path | str = youtube_value
+            elif local_value:
+                chosen = Path(local_value).expanduser()
             elif uploaded_file:
                 chosen = uploaded_file.name if hasattr(uploaded_file, "name") else uploaded_file
             else:
                 return (
-                    "### ⚠️ No input selected\n\nUpload a video or paste its local path.",
+                    "### ⚠️ No input selected\n\nUpload a video, paste a local path, "
+                    "or paste a YouTube URL.",
                     [],
                     [],
                     "",
@@ -2338,9 +2579,10 @@ def launch_ui(args: argparse.Namespace) -> int:
                 warning_md = "\n\n**Warnings**\n" + "\n".join(
                     f"- {w}" for w in result.warnings
                 )
+            source_label = result.source_label or Path(str(result.source)).name
             status_md = (
                 f"### ✅ Created {len(result.clips)} clip(s)\n\n"
-                f"**Source:** `{result.source.name}`  \n"
+                f"**Source:** `{source_label}`  \n"
                 f"**Language:** `{result.language}` "
                 f"({result.language_probability:.0%} confidence)  \n"
                 f"**Whisper backend:** `{result.backend}`  \n"
@@ -2363,8 +2605,8 @@ def launch_ui(args: argparse.Namespace) -> int:
         run_button.click(
             fn=handle_run,
             inputs=[
-                upload, local_path, duration, clip_count, model_size, language,
-                crop_mode, burn_captions, device, use_ollama, ollama_model,
+                upload, local_path, youtube_url, duration, clip_count, model_size,
+                language, crop_mode, burn_captions, device, use_ollama, ollama_model,
             ],
             outputs=[status, gallery, downloads, details],
             api_name="create_clips",

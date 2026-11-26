@@ -54,6 +54,33 @@ subscriptions. The optional Colab/Codespaces environments require a Google or
 GitHub account. The first Whisper run in either app downloads a free model from
 Hugging Face once; after that it can run offline locally.
 
+## ▶️ YouTube links (local app only)
+
+Paste a YouTube URL instead of a file — the full video is **not** downloaded to
+your disk. The app uses the free `yt-dlp` package to resolve a direct stream,
+extracts only the audio needed for transcription, and asks FFmpeg to fetch just
+the selected video ranges when rendering each clip.
+
+```bash
+python app.py --cli --youtube "https://www.youtube.com/watch?v=VIDEO_ID" --clips 3
+# --input also accepts a YouTube URL
+python app.py --cli --input "https://youtu.be/VIDEO_ID" --duration 45 --clips 2
+```
+
+In the Gradio UI, paste the link into **"…or paste a YouTube URL"** and press
+**Find & render highlights**. The URL takes precedence over a local path or
+uploaded file.
+
+Notes:
+
+- Requires `yt-dlp` (included in `requirements.txt`) and internet access.
+- Single finished videos only; playlists and live streams are rejected with a
+  clear message.
+- Only public videos your network can reach are supported. Respect YouTube's
+  terms of service and local laws.
+- The browser-only GitHub Pages app cannot do this: browsers cannot read
+  YouTube streams directly because of CORS. Use the local Python app.
+
 ---
 
 ## Directory structure
@@ -96,6 +123,7 @@ Colab, or account is needed.
 
 - Python **3.10+** (3.11 or 3.12 is the safest choice)
 - FFmpeg **5.0+** with `libass` and `libx264`
+- `yt-dlp` (installed by `pip install -r requirements.txt`) for YouTube URLs
 - A CUDA GPU is optional. CPU-only operation is fully supported and automatic.
 
 Check your FFmpeg build includes the subtitle renderer:
@@ -185,7 +213,7 @@ Then forward port `7860` in the Codespaces Ports panel.
 
 The UI lets you:
 
-1. Upload an MP4/MKV/MOV/WebM or paste a local path.
+1. Upload an MP4/MKV/MOV/WebM, paste a local path, or paste a YouTube URL.
 2. Pick a 30, 45, or 60 second target and 1–5 clips.
 3. Choose face-aware or centered reframing.
 4. Toggle burned-in captions.
@@ -212,6 +240,9 @@ python app.py --cli \
 
 # Higher-accuracy transcription
 python app.py --cli --input talk.mp4 --duration 60 --clips 3 --model small
+
+# From a YouTube link (no full video file is saved)
+python app.py --cli --youtube "https://www.youtube.com/watch?v=VIDEO_ID" --clips 3
 
 # Optional local LLM reranking
 ollama serve
@@ -241,7 +272,8 @@ score breakdown, transcript snippet, and the manifest location.
 | Option | Description | Default |
 |---|---|---|
 | `--cli` | Run the pipeline instead of the UI | UI |
-| `--input PATH` | Local video file (required with `--cli`) | — |
+| `--input PATH_OR_URL` | Local video file or YouTube URL (required with `--cli`) | — |
+| `--youtube URL` | YouTube URL alias for `--input` | — |
 | `--duration {30,45,60}` | Target highlight length | `45` |
 | `--clips N` | Number of highlights (1–5) | `3` |
 | `--model {base,small}` | faster-whisper model | `base` |
@@ -389,6 +421,11 @@ the initial GPU attempt.
 Haar cascades work best with a clear, front-facing face. Use `--crop center` for
 screen recordings, gameplay, or non-human subjects.
 
+**YouTube link fails**  
+Update yt-dlp with `pip install -U yt-dlp`. Live streams, playlists, private or
+region-blocked videos are not supported. If YouTube blocks the network, try a
+different connection or use a local file instead.
+
 **Port already in use**  
 `python app.py --port 7861`
 
@@ -409,6 +446,9 @@ itself uses modest memory at 1080×1920.
   the Whisper model files are fetched from the CDN on first use.
 - Local Python: uploaded/local videos are read directly from disk and never
   uploaded; Whisper inference is local.
+- YouTube mode contacts YouTube/yt-dlp to resolve the stream and fetches audio
+  plus the selected video ranges. No full video is written to disk, and no
+  account or paid API is used.
 - Gradio binds locally by default (`share=False`); the legacy Colab notebook
   explicitly opts into a temporary public link with `--share`. Analytics/telemetry are disabled.
 - Model downloads touch Hugging Face only on first use.
