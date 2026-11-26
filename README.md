@@ -1,6 +1,7 @@
 # Viral Clip Forge
 
-[![Open In Colab - Live Demo](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Aryann-4/viral-clipper/blob/main/Viral_Clipper_Demo.ipynb)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-GitHub%20Pages-blue)](https://aryann-4.github.io/viral-clipper/)
+[![Open In Colab - Run Demo](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Aryann-4/viral-clipper/blob/main/Viral_Clipper_Demo.ipynb)
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Aryann-4/viral-clipper?quickstart=1)
 [![Example Output](https://img.shields.io/badge/Example-Output%20Video-blue)](docs/demo.mp4)
 [![GitHub](https://img.shields.io/badge/GitHub-Aryann--4%2Fviral--clipper-black)](https://github.com/Aryann-4/viral-clipper)
@@ -8,12 +9,16 @@
 A fully local, free, open-source alternative to OpusClip for turning one long
 video into several captioned, vertical 9:16 highlights.
 
-## 🚀 Live Demo (Working)
+## 🚀 Live Demo
 
-**Run the project now in your browser:**
+**Open the project demo site:** <https://aryann-4.github.io/viral-clipper/>
 
-- **[Open Viral Clip Forge in Google Colab](https://colab.research.google.com/github/Aryann-4/viral-clipper/blob/main/Viral_Clipper_Demo.ipynb)** — one-click runnable demo. Run the cells, wait for the Gradio public URL, then upload a video and generate clips.
-- **[Open in GitHub Codespaces](https://codespaces.new/Aryann-4/viral-clipper?quickstart=1)** — full dev environment in the browser; run `python app.py` after setup.
+It includes the example output and buttons to launch the app. There is no
+permanently hosted Gradio instance; the interactive demo runs in your own
+Colab or Codespace session:
+
+- **[Run in Google Colab](https://colab.research.google.com/github/Aryann-4/viral-clipper/blob/main/Viral_Clipper_Demo.ipynb)** — run the cells, wait for the temporary Gradio URL, then upload a video or copy it into the Colab VM.
+- **[Open in GitHub Codespaces](https://codespaces.new/Aryann-4/viral-clipper?quickstart=1)** — full dev environment in the browser; follow the setup below and bind to `0.0.0.0`.
 
 **Example output:** [docs/demo.mp4](docs/demo.mp4) — a rendered 9:16 clip with reframing, burned-in captions, and active-word highlighting.
 
@@ -27,9 +32,10 @@ It runs entirely on your machine:
 - **Optional Ollama** local LLM reranking (disabled by default)
 - **Gradio** local browser UI and a scriptable CLI
 
-No paid APIs, cloud accounts, tokens, or subscriptions are used. The first
-Whisper run downloads a free model from Hugging Face once; after that the app
-can run offline.
+The app itself uses no paid APIs, accounts, tokens, or subscriptions. The
+optional browser-run environments require a Google or GitHub account, and the
+first Whisper run downloads a free model from Hugging Face once; after that the
+app can run offline locally.
 
 ---
 
@@ -43,6 +49,7 @@ viral-clipper/
 ├── README.md
 ├── .gitignore
 ├── docs/
+│   ├── index.html              # GitHub Pages demo site
 │   └── demo.mp4                # Example rendered output clip
 └── output_clips/               # Generated MP4 clips, ASS captions, JSON manifest
     └── .gitkeep
@@ -138,6 +145,16 @@ python app.py --host 127.0.0.1 --port 7861 --no-browser
 python app.py --ffmpeg /usr/local/bin/ffmpeg --ffprobe /usr/local/bin/ffprobe
 ```
 
+In GitHub Codespaces, install the system tool first and bind to all interfaces:
+
+```bash
+sudo apt-get update && sudo apt-get install -y ffmpeg
+pip install -r requirements.txt
+python app.py --host 0.0.0.0 --no-browser
+```
+
+Then forward port `7860` in the Codespaces Ports panel.
+
 The UI lets you:
 
 1. Upload an MP4/MKV/MOV/WebM or paste a local path.
@@ -212,6 +229,7 @@ score breakdown, transcript snippet, and the manifest location.
 | `--ffprobe PATH` | Custom FFprobe binary | PATH |
 | `--host`, `--port` | UI bind address and port | `127.0.0.1`, `7860` |
 | `--no-browser` | Do not auto-open a browser | off |
+| `--share` | Create a temporary public Gradio URL (for Colab/Kaggle) | off |
 | `--verbose` | Debug logging | off |
 
 ---
@@ -346,6 +364,11 @@ screen recordings, gameplay, or non-human subjects.
 **Port already in use**  
 `python app.py --port 7861`
 
+**No public Gradio URL with `--share`**
+The local server still works; the public `gradio.live` link needs outbound
+access to Gradio's tunnel service. Retry the Colab cell or use the forwarded
+Codespaces port instead.
+
 **Out of memory**  
 Use `--model base`, close other GPU apps, or force `--device cpu`. Rendering
 itself uses modest memory at 1080×1920.
@@ -356,7 +379,7 @@ itself uses modest memory at 1080×1920.
 
 - Uploaded/local videos are read directly from disk and never uploaded.
 - Whisper inference is local.
-- Gradio runs with `share=False`; analytics/telemetry are disabled.
+- Gradio binds locally by default (`share=False`); the Colab notebook explicitly opts into a temporary public link with `--share`. Analytics/telemetry are disabled.
 - Model downloads touch Hugging Face only on first use.
 - Ollama reranking is optional, restricted to localhost URLs, and never
   required.

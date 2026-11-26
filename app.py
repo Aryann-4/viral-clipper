@@ -539,7 +539,9 @@ def _cuda_device_count() -> int:
         return 0
 
 
-def _resolve_backend(preference: str, compute_type: str) -> tuple[str, str]:
+def _resolve_backend(
+    preference: str, compute_type: str, warnings: list[str] | None = None
+) -> tuple[str, str]:
     preference = (preference or "auto").lower()
     if preference not in {"auto", "cpu", "cuda"}:
         raise ClipperError("Device must be one of: auto, cpu, cuda.")
@@ -548,10 +550,16 @@ def _resolve_backend(preference: str, compute_type: str) -> tuple[str, str]:
     else:
         device = preference
     if device == "cuda" and _CUDA_RUNTIME_BROKEN:
-        LOG.warning("CUDA previously failed at runtime; using CPU for this session.")
+        warning = "CUDA previously failed at runtime; using CPU for this session."
+        LOG.warning(warning)
+        if warnings is not None:
+            warnings.append(warning)
         device = "cpu"
     if device == "cuda" and _cuda_device_count() == 0:
-        LOG.warning("CUDA was requested but no GPU was detected; falling back to CPU.")
+        warning = "CUDA was requested but no GPU was detected; falling back to CPU."
+        LOG.warning(warning)
+        if warnings is not None:
+            warnings.append(warning)
         device = "cpu"
     if compute_type == "auto":
         compute_type = "float16" if device == "cuda" else "int8"
@@ -575,7 +583,7 @@ def _load_whisper_model(
     if model_size not in SUPPORTED_MODELS:
         raise ClipperError(f"Unsupported Whisper model: {model_size!r}.")
     device, compute_type = _resolve_backend(
-        settings.device_preference, settings.compute_type
+        settings.device_preference, settings.compute_type, warnings
     )
     cache_key = (model_size, device, compute_type, min(8, os.cpu_count() or 4))
     with _MODEL_LOCK:
@@ -885,17 +893,16 @@ def generate_candidates(
             duration = running_end - sentences[i].start
             if duration > hard_max:
                 break
-            if duration >= min_duration and duration <= max_duration:
+            if duration >= min_duration and duration <= hard_max:
                 distance = abs(duration - target_duration)
                 if best is None or distance < best[0]:
                     best = (distance, j)
-            if duration > target_duration * 1.08:
-                break
         if best is None:
             # A very short source: offer the whole remaining speech as one clip.
             if i == 0:
                 duration = sentences[-1].end - sentences[0].start
-                if 3.0 <= duration <= max(max_duration, target_duration * 1.35):
+                fallback_max = min(total_duration, max(max_duration, target_duration * 1.35))
+                if 3.0 <= duration <= fallback_max:
                     best = (abs(duration - target_duration), len(sentences) - 1)
                 else:
                     continue
@@ -929,9 +936,19 @@ def generate_candidates(
     # A source shorter than the requested minimum still gets one usable clip.
     if not candidates and sentences:
         start = max(0.0, sentences[0].start)
-        end = min(total_duration, sentences[-1].end)
-        text = detokenize([w for s in sentences for w in s.words])
-        if end - start >= 2.0 and text:
+        fallback_max = min(total_duration, max(max_duration, target_duration * 1.35))
+        end = min(total_duration, sentences[-1].end, start + fallback_max)
+        fallback_words = [
+            word
+            for sentence in sentences
+            for word in sentence.words
+            if word.end <= end + 0.01
+        ]
+        text = detokenize(fallback_words)
+        if 2.0 <= end - start <= fallback_max and len(WORD_TOKEN_RE.findall(text)) >= 5:
+            sentence_end = max(
+                index for index, sentence in enumerate(sentences) if sentence.start < end
+            )
             candidates.append(
                 Candidate(
                     start=start,
@@ -939,7 +956,7 @@ def generate_candidates(
                     text=text,
                     word_count=len(WORD_TOKEN_RE.findall(text)),
                     sentence_start=0,
-                    sentence_end=len(sentences) - 1,
+                    sentence_end=sentence_end,
                 )
             )
     return candidates
@@ -1205,6 +1222,17 @@ def _smooth_face_path(path: np.ndarray) -> np.ndarray:
     return output
 
 
+MAX_TRACKING_POINTS = 80
+
+
+def _effective_face_sample_fps(requested_fps: float, duration: float) -> float:
+    """Clamp face sampling so the crop expression stays within FFmpeg limits."""
+    sample_fps = max(0.5, min(4.0, float(requested_fps or 0.0)))
+    if duration > 0.1:
+        sample_fps = min(sample_fps, MAX_TRACKING_POINTS / duration)
+    return max(0.5, sample_fps)
+
+
 def _tracking_expression(center_fractions: np.ndarray, sample_fps: float) -> str:
     """Build a piecewise-linear FFmpeg expression for a smoothed face path."""
     values = np.asarray(center_fractions, dtype=float)
@@ -1213,6 +1241,14 @@ def _tracking_expression(center_fractions: np.ndarray, sample_fps: float) -> str
     values = np.clip(values, 0.0, 1.0)
     if values.size == 1 or float(np.max(values) - np.min(values)) < 0.002:
         return f"{float(np.mean(values)):.6f}"
+
+    # Very deep nested if() expressions are rejected by FFmpeg's evaluator.
+    # Resample along the same timeline so long clips keep a valid, smooth path.
+    if values.size > MAX_TRACKING_POINTS:
+        end_time = (values.size - 1) / max(sample_fps, 0.001)
+        indices = np.linspace(0, values.size - 1, MAX_TRACKING_POINTS)
+        values = np.interp(indices, np.arange(values.size), values)
+        sample_fps = (MAX_TRACKING_POINTS - 1) / max(end_time, 0.001)
 
     # Build from the end backwards so each branch is a valid nested if().
     expression = f"{float(values[-1]):.6f}"
@@ -1255,7 +1291,7 @@ def analyze_face_path(
     frames_dir = workdir / "face_frames"
     shutil.rmtree(frames_dir, ignore_errors=True)
     frames_dir.mkdir(parents=True, exist_ok=True)
-    sample_fps = max(0.5, min(4.0, settings.face_sample_fps))
+    sample_fps = _effective_face_sample_fps(settings.face_sample_fps, duration)
     cmd = _ffmpeg_base(ffmpeg) + [
         "-ss", f"{max(0.0, start):.3f}",
         "-i", str(media.path),
@@ -1414,7 +1450,7 @@ def _caption_groups(
             # word so source timestamps remain untouched.
             groups[index][-1] = Word(
                 start=groups[index][-1].start,
-                end=max(groups[index][-1].start + 0.04, next_start - 0.22),
+                end=max(groups[index][-1].start + 0.04, next_start - 0.26),
                 text=groups[index][-1].text,
             )
     return groups
@@ -1431,10 +1467,11 @@ def build_ass_captions(
     """Write bold, short-phrase ASS captions with an active-word highlight."""
     groups = _caption_groups(words, clip_start, clip_duration)
     events: list[str] = []
+    previous_cue_end = 0.0
     for group in groups:
         if not group:
             continue
-        cue_start = max(0.0, group[0].start - 0.04)
+        cue_start = max(0.0, group[0].start - 0.04, previous_cue_end)
         cue_end = min(clip_duration, group[-1].end + 0.22)
         if cue_end <= cue_start:
             continue
@@ -1465,6 +1502,7 @@ def build_ass_captions(
                     "Dialogue: 0,"
                     f"{_ass_time(event_start)},{_ass_time(event_end)},Viral,,0,0,0,,{line}"
                 )
+        previous_cue_end = cue_end
 
     header = f"""[Script Info]
 ; Generated by Viral Clip Forge
@@ -1572,8 +1610,8 @@ def _render_once(
             verified_duration = 0.0
         if verify.returncode != 0 or verified_duration <= 0.1:
             raise FFmpegError("Rendered clip could not be verified as a valid video.")
-    except Exception:
-        # Never leave a truncated MP4 behind after a failed render.
+    except BaseException:
+        # Never leave a truncated MP4 behind after a failed or interrupted render.
         try:
             output_path.unlink(missing_ok=True)
         except OSError:
@@ -1632,7 +1670,10 @@ def render_clip(
         face_path = analyze_face_path(
             media, clip_start, duration, workdir, ffmpeg, settings, warnings
         )
-    x_expression = crop_expression(face_path, settings.face_sample_fps)
+    effective_face_fps = _effective_face_sample_fps(
+        settings.face_sample_fps, duration
+    )
+    x_expression = crop_expression(face_path, effective_face_fps)
 
     if progress:
         progress(0.76 + 0.20 * (clip_rank - 1) / max(1, settings.clip_count),
@@ -1675,6 +1716,10 @@ def render_clip(
         try:
             shutil.copy2(caption_work_file, caption_output)
         except OSError as exc:
+            try:
+                caption_output.unlink(missing_ok=True)
+            except OSError:
+                pass
             warnings.append(f"Could not copy editable captions for clip {clip_rank}: {exc}")
             caption_output = None
 
