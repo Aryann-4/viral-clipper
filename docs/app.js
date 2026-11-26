@@ -359,3 +359,100 @@ dropZone.addEventListener("drop", (event) => {
   fileInput.files = event.dataTransfer.files;
   fileInput.dispatchEvent(new Event("change"));
 });
+
+// --- Source tabs and YouTube link helper ------------------------------------
+
+const tabButtons = Array.from(document.querySelectorAll(".tab-button"));
+const tabsList = $(".tabs");
+const uploadPanel = $("#panel-upload");
+const youtubePanel = $("#panel-youtube");
+const youtubeLinkInput = $("#youtube-link");
+const youtubeCommand = $("#youtube-command");
+const copyCommandButton = $("#copy-command");
+const copyStatus = $("#copy-status");
+
+const YOUTUBE_LINK_RE =
+  /^(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?|shorts\/|embed\/|live\/|replay\/)|youtu\.be\/)/i;
+
+function shellQuote(value) {
+  return `"${value.replace(/(["\\$`])/g, "\\$1")}"`;
+}
+
+function activateTab(name) {
+  for (const button of tabButtons) {
+    const active = button.dataset.tab === name;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  }
+  if (uploadPanel) uploadPanel.hidden = name !== "upload";
+  if (youtubePanel) youtubePanel.hidden = name !== "youtube";
+}
+
+function updateYoutubeCommand() {
+  if (!youtubeCommand || !copyCommandButton || !copyStatus || !youtubeLinkInput) return;
+  const link = (youtubeLinkInput.value || "").trim();
+  youtubeCommand.textContent = "";
+  if (!link) {
+    copyStatus.textContent = "Paste a link to build the command.";
+    copyCommandButton.disabled = true;
+    return;
+  }
+  if (!YOUTUBE_LINK_RE.test(link)) {
+    copyStatus.textContent = "That does not look like a YouTube video link.";
+    copyCommandButton.disabled = true;
+    return;
+  }
+  youtubeCommand.textContent =
+    `python app.py --cli --youtube ${shellQuote(link)} --clips 3`;
+  copyStatus.textContent = "Run this inside the local app folder after installing requirements.";
+  copyCommandButton.disabled = false;
+}
+
+for (const button of tabButtons) {
+  button.addEventListener("click", () => activateTab(button.dataset.tab));
+}
+
+tabsList?.addEventListener("keydown", (event) => {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  const current = tabButtons.indexOf(document.activeElement);
+  if (current < 0) return;
+  event.preventDefault();
+  let next = current;
+  if (event.key === "ArrowLeft") next = (current - 1 + tabButtons.length) % tabButtons.length;
+  if (event.key === "ArrowRight") next = (current + 1) % tabButtons.length;
+  if (event.key === "Home") next = 0;
+  if (event.key === "End") next = tabButtons.length - 1;
+  tabButtons[next].focus();
+  activateTab(tabButtons[next].dataset.tab);
+});
+
+youtubeLinkInput?.addEventListener("input", updateYoutubeCommand);
+
+copyCommandButton?.addEventListener("click", async () => {
+  const command = (youtubeCommand?.textContent || "").trim();
+  if (!command) return;
+  try {
+    await navigator.clipboard.writeText(command);
+    if (copyStatus) copyStatus.textContent = "Copied! Paste it into a terminal in the local app folder.";
+  } catch {
+    // Fallback for browsers that block the Clipboard API.
+    const helper = document.createElement("textarea");
+    helper.value = command;
+    helper.setAttribute("readonly", "");
+    helper.style.position = "fixed";
+    helper.style.opacity = "0";
+    document.body.append(helper);
+    helper.select();
+    const copied = document.execCommand("copy");
+    helper.remove();
+    if (copyStatus) {
+      copyStatus.textContent = copied
+        ? "Copied! Paste it into a terminal in the local app folder."
+        : "Copy failed — select the command above and copy it manually.";
+    }
+  }
+});
+
+activateTab("upload");
+updateYoutubeCommand();

@@ -296,6 +296,63 @@
       font-size: 13px;
     }
 
+    [hidden] { display: none !important; }
+
+    .tabs {
+      display: flex;
+      gap: 6px;
+      margin-top: 28px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .tab-button {
+      padding: 10px 14px;
+      border: 0;
+      border-bottom: 2px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      font-size: 14px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    .tab-button:hover { color: var(--text); }
+
+    .tab-button.active {
+      border-bottom-color: var(--accent-2);
+      color: var(--text);
+    }
+
+    .panel.tool { margin-top: 0; }
+
+    input[type="url"] {
+      width: 100%;
+      min-height: 44px;
+      margin-top: 7px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel-2);
+      color: var(--text);
+      font: inherit;
+      font-size: 14px;
+    }
+
+    .command {
+      display: block;
+      margin-top: 16px;
+      overflow-x: auto;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0e1216;
+      color: var(--accent-2);
+      font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
     .output-section {
       padding: 0 0 64px;
     }
@@ -392,50 +449,71 @@
         <h1>Turn long videos into <span>vertical shorts.</span></h1>
         <p class="lede">Upload a video, transcribe it with local WebAssembly models, and generate captioned 1080×1920 clips. No Colab, no backend, no account, and no paid APIs.</p>
 
-        <form class="panel tool" id="tool-form">
-          <div class="drop-zone" id="drop-zone">
-            <div>
-              <strong>Drop a video here</strong>
-              <small>MP4, MKV, MOV, WebM · best with files under 600 MB</small>
-            </div>
-          </div>
-          <input id="file" name="file" type="file" accept="video/mp4,video/x-m4v,video/quicktime,video/webm,video/x-matroska,.mkv" required>
+        <div class="tabs" role="tablist" aria-label="Input type">
+          <button class="tab-button active" type="button" data-tab="upload" role="tab" aria-selected="true" aria-controls="panel-upload">Upload video</button>
+          <button class="tab-button" type="button" data-tab="youtube" role="tab" aria-selected="false" aria-controls="panel-youtube">YouTube link</button>
+        </div>
 
-          <div class="settings">
-            <div>
-              <label for="model">Speech model</label>
-              <select id="model">
-                <option value="Xenova/whisper-tiny.en">Tiny English (fast)</option>
-                <option value="Xenova/whisper-base.en">Base English (slower)</option>
-              </select>
+        <div id="panel-upload">
+          <form class="panel tool" id="tool-form">
+            <div class="drop-zone" id="drop-zone">
+              <div>
+                <strong>Drop a video here</strong>
+                <small>MP4, MKV, MOV, WebM · best with files under 600 MB</small>
+              </div>
             </div>
-            <div>
-              <label for="duration">Clip length</label>
-              <select id="duration">
-                <option value="30">30 seconds</option>
-                <option value="45" selected>45 seconds</option>
-                <option value="60">60 seconds</option>
-              </select>
-            </div>
-            <div>
-              <label for="clips">Clips</label>
-              <select id="clips">
-                <option value="1">1 clip</option>
-                <option value="2">2 clips</option>
-                <option value="3" selected>3 clips</option>
-              </select>
-            </div>
-          </div>
+            <input id="file" name="file" type="file" accept="video/mp4,video/x-m4v,video/quicktime,video/webm,video/x-matroska,.mkv" required>
 
-          <div class="run-row">
-            <button class="button button-primary" id="run" type="button">Generate clips in browser</button>
-            <span class="status" id="status" aria-live="polite">Waiting for a video.</span>
-          </div>
-          <div class="progress-track"><div class="progress-bar" id="progress-bar"></div></div>
-          <div class="error" id="error" role="alert" hidden></div>
-        </form>
+            <div class="settings">
+              <div>
+                <label for="model">Speech model</label>
+                <select id="model">
+                  <option value="Xenova/whisper-tiny.en">Tiny English (fast)</option>
+                  <option value="Xenova/whisper-base.en">Base English (slower)</option>
+                </select>
+              </div>
+              <div>
+                <label for="duration">Clip length</label>
+                <select id="duration">
+                  <option value="30">30 seconds</option>
+                  <option value="45" selected>45 seconds</option>
+                  <option value="60">60 seconds</option>
+                </select>
+              </div>
+              <div>
+                <label for="clips">Clips</label>
+                <select id="clips">
+                  <option value="1">1 clip</option>
+                  <option value="2">2 clips</option>
+                  <option value="3" selected>3 clips</option>
+                </select>
+              </div>
+            </div>
 
-        <p class="note">First run downloads the FFmpeg core (about 31 MB) and a Whisper model. Everything then runs on your device; only the model files come from Hugging Face. YouTube links are supported in the <a href="https://github.com/Aryann-4/viral-clipper#%EF%B8%8F-youtube-links-local-app-only">local Python app</a> — browsers cannot read YouTube streams directly.</p>
+            <div class="run-row">
+              <button class="button button-primary" id="run" type="button">Generate clips in browser</button>
+              <span class="status" id="status" aria-live="polite">Waiting for a video.</span>
+            </div>
+            <div class="progress-track"><div class="progress-bar" id="progress-bar"></div></div>
+            <div class="error" id="error" role="alert" hidden></div>
+          </form>
+
+          <p class="note">First run downloads the FFmpeg core (about 31 MB) and a Whisper model. Everything then runs on your device; only the model files come from Hugging Face.</p>
+        </div>
+
+        <div id="panel-youtube" hidden>
+          <form class="panel tool" id="youtube-form">
+            <label for="youtube-link">YouTube video URL</label>
+            <input id="youtube-link" name="youtube-link" type="url" placeholder="https://www.youtube.com/watch?v=VIDEO_ID">
+            <p class="note">Browsers cannot read YouTube streams directly, so this static page cannot render clips from a link. Use the free local Python app: it fetches only the audio and the selected video ranges, never the full video.</p>
+            <code class="command" id="youtube-command"></code>
+            <div class="run-row">
+              <button class="button button-primary" id="copy-command" type="button">Copy local command</button>
+              <span class="status" id="copy-status">Paste a link to build the command.</span>
+            </div>
+            <p class="note"><a href="https://github.com/Aryann-4/viral-clipper#%EF%B8%8F-youtube-links-local-app-only">Full YouTube setup instructions →</a></p>
+          </form>
+        </div>
       </section>
 
       <section class="panel media-card" aria-label="Video preview and example output">

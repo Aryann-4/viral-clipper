@@ -2389,28 +2389,31 @@ def launch_ui(args: argparse.Namespace) -> int:
         with gr.Row():
             with gr.Column(scale=5):
                 gr.Markdown("### 1. Choose your source")
-                upload = gr.File(
-                    label="Upload video",
-                    file_types=["video", ".mp4", ".mkv", ".mov", ".webm", ".m4v"],
-                    type="filepath",
-                    file_count="single",
-                )
-                local_path = gr.Textbox(
-                    label="…or paste a local file path",
-                    placeholder="/home/you/Videos/podcast.mp4",
-                    info="A local path takes precedence over the uploaded file.",
-                    lines=1,
-                )
-                youtube_url = gr.Textbox(
-                    label="…or paste a YouTube URL",
-                    placeholder="https://www.youtube.com/watch?v=...",
-                    info=(
-                        "Only the audio and the selected video ranges are fetched — "
-                        "the full video is never saved. This takes precedence over "
-                        "the local path and upload."
-                    ),
-                    lines=1,
-                )
+                with gr.Tabs():
+                    with gr.Tab("📁 Upload / Local file"):
+                        upload = gr.File(
+                            label="Upload video",
+                            file_types=["video", ".mp4", ".mkv", ".mov", ".webm", ".m4v"],
+                            type="filepath",
+                            file_count="single",
+                        )
+                        local_path = gr.Textbox(
+                            label="…or paste a local file path",
+                            placeholder="/home/you/Videos/podcast.mp4",
+                            info="A local path takes precedence over the uploaded file.",
+                            lines=1,
+                        )
+                    with gr.Tab("▶️ YouTube URL"):
+                        youtube_url = gr.Textbox(
+                            label="Paste a YouTube video link",
+                            placeholder="https://www.youtube.com/watch?v=VIDEO_ID",
+                            info=(
+                                "Works in this local app only. The full video is never "
+                                "saved — only the audio and the selected video ranges "
+                                "are fetched. Playlists and live streams are not supported."
+                            ),
+                            lines=2,
+                        )
                 gr.Markdown(
                     "### 2. Clip settings"
                 )
