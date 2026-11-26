@@ -1,6 +1,7 @@
 # Viral Clip Forge
 
 [![Live Demo](https://img.shields.io/badge/Live%20Demo-Video-blue)](docs/demo.mp4)
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Aryann-4/viral-clipper?quickstart=1)
 [![GitHub](https://img.shields.io/badge/GitHub-Aryann--4%2Fviral--clipper-black)](https://github.com/Aryann-4/viral-clipper)
 
 A fully local, free, open-source alternative to OpusClip for turning one long
