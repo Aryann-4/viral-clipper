@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local caches / models
+.cache/
+*.pt
+*.bin
+*.onnx
+
+# Generated media
+output_clips/*
+!output_clips/.gitkeep
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

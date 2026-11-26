@@ -1,0 +1,12 @@
+# Viral Clip Forge — 100% local, open-source dependencies.
+#
+# Python 3.10–3.14 are supported by current wheels. Python 3.11 or 3.12 is the
+# safest choice on machines where binary wheels lag behind.
+#
+# FFmpeg/FFprobe are system binaries, not pip packages. Install them separately
+# (see README.md).
+
+faster-whisper>=1.1.0,<2.0
+gradio>=5.0,<7.0
+numpy>=1.26,<3.0
+opencv-python-headless>=4.9,<5.0
