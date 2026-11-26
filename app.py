@@ -1990,6 +1990,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-browser", action="store_true", help="Do not open the browser automatically."
     )
+    parser.add_argument(
+        "--share", action="store_true",
+        help="Create a temporary public Gradio link (useful in Colab/Kaggle).",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     return parser
 
@@ -2326,7 +2330,7 @@ def launch_ui(args: argparse.Namespace) -> int:
         demo.queue(default_concurrency_limit=1, max_size=8).launch(
             server_name=args.host,
             server_port=args.port,
-            share=False,
+            share=bool(args.share),
             inbrowser=not args.no_browser,
             show_error=True,
             allowed_paths=[str(output_dir), str(CACHE_DIR)],

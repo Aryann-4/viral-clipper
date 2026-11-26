@@ -2,6 +2,7 @@
 
 [![Live Demo](https://img.shields.io/badge/Live%20Demo-Video-blue)](docs/demo.mp4)
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Aryann-4/viral-clipper?quickstart=1)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Aryann-4/viral-clipper/blob/main/Viral_Clipper_Demo.ipynb)
 [![GitHub](https://img.shields.io/badge/GitHub-Aryann--4%2Fviral--clipper-black)](https://github.com/Aryann-4/viral-clipper)
 
 A fully local, free, open-source alternative to OpusClip for turning one long
