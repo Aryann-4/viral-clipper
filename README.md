@@ -1,7 +1,16 @@
 # Viral Clip Forge
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Video-blue)](docs/demo.mp4)
+[![GitHub](https://img.shields.io/badge/GitHub-Aryann--4%2Fviral--clipper-black)](https://github.com/Aryann-4/viral-clipper)
+
 A fully local, free, open-source alternative to OpusClip for turning one long
 video into several captioned, vertical 9:16 highlights.
+
+## Live demo
+
+A short rendered example is included in the repository: [docs/demo.mp4](docs/demo.mp4).
+Open it directly on GitHub or download it to see the 9:16 reframing, captions,
+and active-word highlighting produced by the tool.
 
 It runs entirely on your machine:
 
