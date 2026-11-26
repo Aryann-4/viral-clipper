@@ -1,7 +1,7 @@
 # Viral Clip Forge
 
-[![Live Demo](https://img.shields.io/badge/Live%20Demo-GitHub%20Pages-blue)](https://aryann-4.github.io/viral-clipper/)
-[![Open In Colab - Run Demo](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Aryann-4/viral-clipper/blob/main/Viral_Clipper_Demo.ipynb)
+[![Browser Demo](https://img.shields.io/badge/Browser%20Demo-GitHub%20Pages-blue)](https://aryann-4.github.io/viral-clipper/)
+[![Legacy Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Aryann-4/viral-clipper/blob/main/Viral_Clipper_Demo.ipynb)
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Aryann-4/viral-clipper?quickstart=1)
 [![Example Output](https://img.shields.io/badge/Example-Output%20Video-blue)](docs/demo.mp4)
 [![GitHub](https://img.shields.io/badge/GitHub-Aryann--4%2Fviral--clipper-black)](https://github.com/Aryann-4/viral-clipper)
@@ -9,20 +9,37 @@
 A fully local, free, open-source alternative to OpusClip for turning one long
 video into several captioned, vertical 9:16 highlights.
 
-## 🚀 Live Demo
+## 🚀 Browser Demo (no Colab, no backend)
 
-**Open the project demo site:** <https://aryann-4.github.io/viral-clipper/>
+**Open the browser app:** <https://aryann-4.github.io/viral-clipper/>
 
-It includes the example output and buttons to launch the app. There is no
-permanently hosted Gradio instance; the interactive demo runs in your own
-Colab or Codespace session:
+This is a single static GitHub Pages site. Upload a video and the whole pipeline
+runs in your browser with WebAssembly — there is no Gradio server, no Colab
+notebook, no account, and no paid API.
 
-- **[Run in Google Colab](https://colab.research.google.com/github/Aryann-4/viral-clipper/blob/main/Viral_Clipper_Demo.ipynb)** — run the cells, wait for the temporary Gradio URL, then upload a video or copy it into the Colab VM.
-- **[Open in GitHub Codespaces](https://codespaces.new/Aryann-4/viral-clipper?quickstart=1)** — full dev environment in the browser; follow the setup below and bind to `0.0.0.0`.
+- **First run downloads** the FFmpeg core (~31 MB, vendored in this repo) and a
+  Whisper model (from Hugging Face). Both are cached by the browser afterward.
+- **After the first load**, the FFmpeg core, Transformers.js script, and cached
+  model are stored in the browser cache, so repeat runs usually work offline.
+- **Browser MVP scope:** English speech, `tiny.en`/`base.en` Whisper, 30/45/60
+  second targets, 1–3 clips, center-crop reframing, burned captions with
+  active-word highlighting, and local scoring. Files above 600 MB are rejected
+  with a friendly message.
+- **Not in the browser MVP:** face-aware crop, non-English models, Ollama
+  reranking, and editable ASS/JSON downloads. Use the local Python app below
+  for those.
 
-**Example output:** [docs/demo.mp4](docs/demo.mp4) — a rendered 9:16 clip with reframing, burned-in captions, and active-word highlighting.
+**Example output:** [docs/demo.mp4](docs/demo.mp4) — a rendered 9:16 clip with
+reframing, burned-in captions, and active-word highlighting.
 
-It runs entirely on your machine:
+The legacy paths still work if you want the full Python feature set:
+
+- **[Legacy Google Colab notebook](https://colab.research.google.com/github/Aryann-4/viral-clipper/blob/main/Viral_Clipper_Demo.ipynb)** — run the cells, wait for a temporary Gradio URL, then upload a video. Requires a Google account.
+- **[GitHub Codespaces](https://codespaces.new/Aryann-4/viral-clipper?quickstart=1)** — full dev environment in the browser; follow the setup below and bind to `0.0.0.0`. Requires a GitHub account.
+
+### Full local Python app
+
+When you want every feature, run the script locally:
 
 - **faster-whisper** (`base` or `small`) for word-level speech transcription
 - **FFmpeg / FFprobe** for probing, trimming, reframing, encoding, and burning captions
@@ -32,10 +49,10 @@ It runs entirely on your machine:
 - **Optional Ollama** local LLM reranking (disabled by default)
 - **Gradio** local browser UI and a scriptable CLI
 
-The app itself uses no paid APIs, accounts, tokens, or subscriptions. The
-optional browser-run environments require a Google or GitHub account, and the
-first Whisper run downloads a free model from Hugging Face once; after that the
-app can run offline locally.
+Neither the browser app nor the Python app uses paid APIs, accounts, tokens, or
+subscriptions. The optional Colab/Codespaces environments require a Google or
+GitHub account. The first Whisper run in either app downloads a free model from
+Hugging Face once; after that it can run offline locally.
 
 ---
 
@@ -44,13 +61,16 @@ app can run offline locally.
 ```
 viral-clipper/
 ├── app.py                      # Complete CLI + Gradio UI + processing pipeline
-├── Viral_Clipper_Demo.ipynb    # Colab notebook — launches a live Gradio demo
+├── Viral_Clipper_Demo.ipynb    # Legacy/optional Colab notebook
 ├── requirements.txt            # Python dependencies (all free/open source)
 ├── README.md
 ├── .gitignore
-├── docs/
-│   ├── index.html              # GitHub Pages demo site
-│   └── demo.mp4                # Example rendered output clip
+├── docs/                       # Browser-only GitHub Pages site
+│   ├── index.html              # Interactive browser app UI
+│   ├── app.js                  # Browser runtime: WASM FFmpeg + Transformers.js
+│   ├── core.js                 # Pure JS scoring, selection, ASS caption builder
+│   ├── demo.mp4                # Example rendered output clip
+│   └── vendor/ffmpeg/          # Vendored ffmpeg.wasm core, worker and font
 └── output_clips/               # Generated MP4 clips, ASS captions, JSON manifest
     └── .gitkeep
 ```
@@ -65,6 +85,14 @@ output_clips/                     # clips, captions and manifest
 ---
 
 ## Requirements
+
+### Browser app
+
+A modern Chromium/Firefox/Safari browser with WebAssembly and Web Workers, plus
+internet access on first load for the Whisper model. No Python, FFmpeg install,
+Colab, or account is needed.
+
+### Full local Python app
 
 - Python **3.10+** (3.11 or 3.12 is the safest choice)
 - FFmpeg **5.0+** with `libass` and `libx264`
@@ -377,9 +405,12 @@ itself uses modest memory at 1080×1920.
 
 ## Privacy
 
-- Uploaded/local videos are read directly from disk and never uploaded.
-- Whisper inference is local.
-- Gradio binds locally by default (`share=False`); the Colab notebook explicitly opts into a temporary public link with `--share`. Analytics/telemetry are disabled.
+- The browser app reads your video from your device and never uploads it. Only
+  the Whisper model files are fetched from the CDN on first use.
+- Local Python: uploaded/local videos are read directly from disk and never
+  uploaded; Whisper inference is local.
+- Gradio binds locally by default (`share=False`); the legacy Colab notebook
+  explicitly opts into a temporary public link with `--share`. Analytics/telemetry are disabled.
 - Model downloads touch Hugging Face only on first use.
 - Ollama reranking is optional, restricted to localhost URLs, and never
   required.

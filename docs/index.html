@@ -3,18 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Viral Clip Forge — Live Demo</title>
-  <meta name="description" content="Turn one long video into captioned 9:16 shorts with a free, local, open-source tool. Watch the example output and launch the live demo.">
+  <title>Viral Clip Forge — Browser Demo</title>
+  <meta name="description" content="Turn a long video into captioned 9:16 shorts entirely in your browser. No Colab, no backend, no paid APIs.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%237c5cff'/%3E%3Ctext x='32' y='43' font-family='sans-serif' font-size='28' font-weight='bold' fill='white' text-anchor='middle'%3EVC%3C/text%3E%3C/svg%3E">
   <style>
     :root {
       color-scheme: dark;
       --bg: #0b0d10;
       --panel: #14181d;
+      --panel-2: #191f26;
       --line: #242a32;
       --text: #f4f7fa;
       --muted: #a7b0bb;
       --accent: #7c5cff;
       --accent-2: #23d5ab;
+      --danger: #ff7b88;
     }
 
     * { box-sizing: border-box; }
@@ -30,7 +33,7 @@
     a { color: inherit; }
 
     .wrap {
-      width: min(1120px, calc(100% - 40px));
+      width: min(1180px, calc(100% - 40px));
       margin: 0 auto;
     }
 
@@ -39,7 +42,7 @@
       align-items: center;
       justify-content: space-between;
       gap: 24px;
-      padding: 28px 0;
+      padding: 26px 0;
       border-bottom: 1px solid var(--line);
     }
 
@@ -71,17 +74,17 @@
 
     main {
       display: grid;
-      grid-template-columns: 1fr 420px;
-      gap: 56px;
-      align-items: center;
-      padding: 80px 0 64px;
+      grid-template-columns: minmax(0, 1.05fr) minmax(340px, .95fr);
+      gap: 48px;
+      align-items: start;
+      padding: 64px 0 48px;
     }
 
     .eyebrow {
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      margin-bottom: 20px;
+      margin-bottom: 18px;
       padding: 6px 12px;
       border: 1px solid var(--line);
       border-radius: 999px;
@@ -100,7 +103,7 @@
     h1 {
       max-width: 620px;
       margin: 0;
-      font-size: clamp(42px, 6vw, 72px);
+      font-size: clamp(40px, 5.6vw, 68px);
       letter-spacing: -.055em;
       line-height: .98;
     }
@@ -113,17 +116,98 @@
     }
 
     .lede {
-      max-width: 560px;
-      margin: 24px 0 0;
+      max-width: 590px;
+      margin: 20px 0 0;
       color: var(--muted);
-      font-size: 18px;
+      font-size: 17px;
     }
 
-    .actions {
-      display: flex;
-      flex-wrap: wrap;
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--panel);
+      box-shadow: 0 24px 70px rgba(0, 0, 0, .28);
+    }
+
+    .tool {
+      margin-top: 28px;
+      padding: 22px;
+    }
+
+    .drop-zone {
+      display: grid;
+      place-items: center;
+      min-height: 116px;
+      padding: 20px;
+      border: 1px dashed #3a4450;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, .015);
+      text-align: center;
+      transition: border-color .15s ease, background .15s ease;
+    }
+
+    .drop-zone.dragging {
+      border-color: var(--accent-2);
+      background: rgba(35, 213, 171, .06);
+    }
+
+    .drop-zone strong { display: block; margin-bottom: 4px; }
+
+    .drop-zone small { color: var(--muted); }
+
+    input[type="file"] {
+      width: 100%;
+      margin-top: 14px;
+      color: var(--muted);
+      font: inherit;
+      font-size: 13px;
+    }
+
+    input[type="file"]::file-selector-button {
+      margin-right: 10px;
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--panel-2);
+      color: var(--text);
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .settings {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
       gap: 12px;
-      margin-top: 32px;
+      margin-top: 18px;
+    }
+
+    label {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: .02em;
+      text-transform: uppercase;
+    }
+
+    select {
+      width: 100%;
+      min-height: 42px;
+      margin-top: 7px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel-2);
+      color: var(--text);
+      font: inherit;
+      font-size: 14px;
+    }
+
+    .run-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-top: 20px;
     }
 
     .button {
@@ -136,65 +220,143 @@
       border-radius: 12px;
       font-weight: 650;
       text-decoration: none;
+      cursor: pointer;
     }
 
     .button-primary {
+      border-color: transparent;
       background: var(--accent);
       color: white;
+      font: inherit;
+      font-weight: 650;
     }
 
-    .button-primary:hover { background: #8e73ff; }
+    .button-primary:hover:not(:disabled) { background: #8e73ff; }
+    .button-primary:disabled { cursor: wait; opacity: .65; }
 
-    .button-secondary {
-      border-color: var(--line);
-      background: var(--panel);
-      color: var(--text);
-    }
-
-    .button-secondary:hover { border-color: #3a4450; }
-
-    .facts {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px 20px;
-      margin-top: 28px;
+    .status {
+      flex: 1;
       color: var(--muted);
-      font-size: 14px;
+      font-size: 13px;
     }
 
-    .facts span::before {
-      margin-right: 8px;
-      color: var(--accent-2);
-      content: "✓";
+    .progress-track {
+      height: 5px;
+      margin-top: 14px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #222831;
     }
 
-    .demo-card {
+    .progress-bar {
+      width: 0;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--accent-2), var(--accent));
+      transition: width .2s ease;
+    }
+
+    .error {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border: 1px solid rgba(255, 123, 136, .45);
+      border-radius: 10px;
+      background: rgba(255, 123, 136, .08);
+      color: var(--danger);
+      font-size: 13px;
+    }
+
+    .media-card {
+      overflow: hidden;
+      padding: 12px;
+    }
+
+    .media-card video {
+      display: block;
+      width: 100%;
+      max-height: 560px;
+      border-radius: 12px;
+      background: #050608;
+      object-fit: contain;
+    }
+
+    .media-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 6px 2px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .note {
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .output-section {
+      padding: 0 0 64px;
+    }
+
+    .output-section h2 {
+      margin: 0 0 18px;
+      font-size: 24px;
+      letter-spacing: -.03em;
+    }
+
+    .result-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 18px;
+    }
+
+    .result-card {
       overflow: hidden;
       border: 1px solid var(--line);
-      border-radius: 20px;
+      border-radius: 16px;
       background: var(--panel);
-      box-shadow: 0 24px 70px rgba(0, 0, 0, .35);
     }
 
-    .demo-card video {
+    .result-card video {
       display: block;
       width: 100%;
       aspect-ratio: 9 / 16;
-      max-height: 640px;
+      max-height: 520px;
       background: #050608;
       object-fit: cover;
     }
 
-    .demo-label {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      padding: 14px 18px;
-      border-top: 1px solid var(--line);
+    .result-meta {
+      padding: 12px 14px 0;
       color: var(--muted);
       font-size: 13px;
     }
+
+    .download {
+      display: inline-block;
+      margin: 10px 14px 14px;
+      color: var(--accent-2);
+      font-size: 13px;
+      font-weight: 650;
+      text-decoration: none;
+    }
+
+    .transcript {
+      max-height: 320px;
+      margin-top: 22px;
+      overflow: auto;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--panel);
+      color: var(--muted);
+      font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+    }
+
+    .transcript:empty { display: none; }
 
     footer {
       padding: 28px 0 40px;
@@ -203,20 +365,17 @@
       font-size: 13px;
     }
 
-    @media (max-width: 860px) {
-      main {
-        grid-template-columns: 1fr;
-        gap: 40px;
-        padding: 56px 0 48px;
-      }
-
-      .demo-card { max-width: 360px; }
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; gap: 32px; padding: 48px 0 40px; }
+      .media-card video { max-height: 440px; }
     }
 
-    @media (max-width: 520px) {
-      .wrap { width: min(100% - 28px, 1120px); }
+    @media (max-width: 560px) {
+      .wrap { width: min(100% - 28px, 1180px); }
       header { padding: 20px 0; }
-      .actions .button { width: 100%; }
+      .settings { grid-template-columns: 1fr; }
+      .run-row { align-items: stretch; flex-direction: column; }
+      .button { width: 100%; }
     }
   </style>
 </head>
@@ -229,31 +388,74 @@
 
     <main>
       <section>
-        <div class="eyebrow">Free · Local · Open source</div>
+        <div class="eyebrow">Runs entirely in your browser</div>
         <h1>Turn long videos into <span>vertical shorts.</span></h1>
-        <p class="lede">Transcribe, find the best moments, crop to 9:16, and burn in captioned highlights — without paid APIs or cloud subscriptions.</p>
-        <div class="actions">
-          <a class="button button-primary" href="https://colab.research.google.com/github/Aryann-4/viral-clipper/blob/main/Viral_Clipper_Demo.ipynb">Launch live demo</a>
-          <a class="button button-secondary" href="https://github.com/Aryann-4/viral-clipper">Get the code</a>
-        </div>
-        <div class="facts">
-          <span>faster-whisper word timings</span>
-          <span>Face-aware reframing</span>
-          <span>Bold burned captions</span>
-          <span>CPU friendly</span>
-        </div>
+        <p class="lede">Upload a video, transcribe it with local WebAssembly models, and generate captioned 1080×1920 clips. No Colab, no backend, no account, and no paid APIs.</p>
+
+        <form class="panel tool" id="tool-form">
+          <div class="drop-zone" id="drop-zone">
+            <div>
+              <strong>Drop a video here</strong>
+              <small>MP4, MKV, MOV, WebM · best with files under 600 MB</small>
+            </div>
+          </div>
+          <input id="file" name="file" type="file" accept="video/mp4,video/x-m4v,video/quicktime,video/webm,video/x-matroska,.mkv" required>
+
+          <div class="settings">
+            <div>
+              <label for="model">Speech model</label>
+              <select id="model">
+                <option value="Xenova/whisper-tiny.en">Tiny English (fast)</option>
+                <option value="Xenova/whisper-base.en">Base English (slower)</option>
+              </select>
+            </div>
+            <div>
+              <label for="duration">Clip length</label>
+              <select id="duration">
+                <option value="30">30 seconds</option>
+                <option value="45" selected>45 seconds</option>
+                <option value="60">60 seconds</option>
+              </select>
+            </div>
+            <div>
+              <label for="clips">Clips</label>
+              <select id="clips">
+                <option value="1">1 clip</option>
+                <option value="2">2 clips</option>
+                <option value="3" selected>3 clips</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="run-row">
+            <button class="button button-primary" id="run" type="button">Generate clips in browser</button>
+            <span class="status" id="status" aria-live="polite">Waiting for a video.</span>
+          </div>
+          <div class="progress-track"><div class="progress-bar" id="progress-bar"></div></div>
+          <div class="error" id="error" role="alert" hidden></div>
+        </form>
+
+        <p class="note">First run downloads the FFmpeg core (about 31 MB) and a Whisper model. Everything then runs on your device; only the model files come from Hugging Face.</p>
       </section>
 
-      <section class="demo-card" aria-label="Example generated short clip">
-        <video src="demo.mp4" controls preload="metadata" playsinline></video>
-        <div class="demo-label">
-          <span>Example output</span>
-          <span>1080 × 1920 · 9:16</span>
-        </div>
+      <section class="panel media-card" aria-label="Video preview and example output">
+        <video id="preview" controls playsinline preload="metadata"></video>
+        <div class="media-label"><span>Your video preview</span><span>source</span></div>
+        <video src="demo.mp4" controls playsinline preload="metadata"></video>
+        <div class="media-label"><span>Example generated short</span><span>1080 × 1920 · 9:16</span></div>
       </section>
     </main>
 
-    <footer>Built with FFmpeg, faster-whisper, OpenCV, NumPy, and Gradio. No paid APIs.</footer>
+    <section class="output-section">
+      <h2>Generated clips</h2>
+      <div class="result-grid" id="results"></div>
+      <div class="transcript" id="transcript"></div>
+    </section>
+
+    <footer>Browser MVP: English speech, center-crop reframing, burned captions, local scoring. Full Python app remains in the repository.</footer>
   </div>
+
+  <noscript>This browser demo needs JavaScript enabled.</noscript>
+  <script type="module" src="./app.js"></script>
 </body>
 </html>
