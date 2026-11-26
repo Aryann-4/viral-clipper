@@ -1,18 +1,21 @@
 # Viral Clip Forge
 
-[![Live Demo](https://img.shields.io/badge/Live%20Demo-Video-blue)](docs/demo.mp4)
+[![Open In Colab - Live Demo](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Aryann-4/viral-clipper/blob/main/Viral_Clipper_Demo.ipynb)
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Aryann-4/viral-clipper?quickstart=1)
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Aryann-4/viral-clipper/blob/main/Viral_Clipper_Demo.ipynb)
+[![Example Output](https://img.shields.io/badge/Example-Output%20Video-blue)](docs/demo.mp4)
 [![GitHub](https://img.shields.io/badge/GitHub-Aryann--4%2Fviral--clipper-black)](https://github.com/Aryann-4/viral-clipper)
 
 A fully local, free, open-source alternative to OpusClip for turning one long
 video into several captioned, vertical 9:16 highlights.
 
-## Live demo
+## 🚀 Live Demo (Working)
 
-A short rendered example is included in the repository: [docs/demo.mp4](docs/demo.mp4).
-Open it directly on GitHub or download it to see the 9:16 reframing, captions,
-and active-word highlighting produced by the tool.
+**Run the project now in your browser:**
+
+- **[Open Viral Clip Forge in Google Colab](https://colab.research.google.com/github/Aryann-4/viral-clipper/blob/main/Viral_Clipper_Demo.ipynb)** — one-click runnable demo. Run the cells, wait for the Gradio public URL, then upload a video and generate clips.
+- **[Open in GitHub Codespaces](https://codespaces.new/Aryann-4/viral-clipper?quickstart=1)** — full dev environment in the browser; run `python app.py` after setup.
+
+**Example output:** [docs/demo.mp4](docs/demo.mp4) — a rendered 9:16 clip with reframing, burned-in captions, and active-word highlighting.
 
 It runs entirely on your machine:
 
@@ -34,11 +37,14 @@ can run offline.
 
 ```
 viral-clipper/
-├── app.py                  # Complete CLI + Gradio UI + processing pipeline
-├── requirements.txt        # Python dependencies (all free/open source)
+├── app.py                      # Complete CLI + Gradio UI + processing pipeline
+├── Viral_Clipper_Demo.ipynb    # Colab notebook — launches a live Gradio demo
+├── requirements.txt            # Python dependencies (all free/open source)
 ├── README.md
 ├── .gitignore
-└── output_clips/           # Generated MP4 clips, ASS captions, JSON manifest
+├── docs/
+│   └── demo.mp4                # Example rendered output clip
+└── output_clips/               # Generated MP4 clips, ASS captions, JSON manifest
     └── .gitkeep
 ```
 
