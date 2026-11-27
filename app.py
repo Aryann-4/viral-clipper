@@ -188,6 +188,7 @@ class MediaInfo:
     # exposes DASH video/audio streams (the common case today).
     source_url: str | None = None
     audio_url: str | None = None
+    audio_format_id: str | None = None
     http_headers: dict[str, str] = field(default_factory=dict)
     audio_headers: dict[str, str] = field(default_factory=dict)
     display_name: str = ""
@@ -391,6 +392,7 @@ def probe_media(
     display_name: str | None = None,
     source_url: str | None = None,
     audio_url: str | None = None,
+    audio_format_id: str | None = None,
     audio_headers: dict[str, str] | None = None,
 ) -> MediaInfo:
     """Validate a local file or direct media URL and return stream information."""
@@ -475,6 +477,7 @@ def probe_media(
         has_audio=True,
         source_url=source_url,
         audio_url=audio_url,
+        audio_format_id=audio_format_id,
         http_headers=dict(headers or {}),
         audio_headers=dict(audio_headers or {}),
         display_name=str(label),
@@ -648,6 +651,7 @@ def resolve_youtube_source(url: str, ffprobe: str) -> MediaInfo:
             display_name=title,
             source_url=webpage_url,
             audio_url=str(audio_fmt["url"]) if audio_fmt else None,
+            audio_format_id=str(audio_fmt.get("format_id")) if audio_fmt else None,
             audio_headers=audio_headers,
         )
     except FFmpegError as exc:
@@ -659,10 +663,71 @@ def resolve_youtube_source(url: str, ffprobe: str) -> MediaInfo:
     return media
 
 
-def extract_audio(media: MediaInfo, wav_path: Path, ffmpeg: str) -> None:
+def _download_youtube_audio(
+    media: MediaInfo,
+    workdir: Path,
+    warnings: list[str] | None = None,
+) -> Path | None:
+    """Fetch only the selected audio track using chunked HTTP requests.
+
+    YouTube throttles long single connections to roughly 30–80 KB/s. yt-dlp's
+    ``http_chunk_size`` turns one long download into many short range requests,
+    which restores normal speed without downloading any video.
+    """
+    if not (media.source_url and media.audio_format_id):
+        return None
+    try:
+        import yt_dlp  # type: ignore
+    except Exception:
+        return None
+
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "format": media.audio_format_id,
+        "outtmpl": str(workdir / "youtube_audio.%(ext)s"),
+        "http_chunk_size": 1 << 20,  # 1 MiB chunks avoid the per-connection cap.
+        "nopart": True,
+        "noprogress": True,
+        "overwrites": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            ydl.download([media.source_url])
+    except Exception as exc:
+        if warnings is not None:
+            warnings.append(
+                "Chunked YouTube audio download failed; falling back to direct "
+                f"FFmpeg extraction. Details: {_tail(str(exc), 300)}"
+            )
+        return None
+
+    matches = sorted(workdir.glob("youtube_audio.*"))
+    return matches[0] if matches else None
+
+
+def extract_audio(
+    media: MediaInfo,
+    wav_path: Path,
+    ffmpeg: str,
+    *,
+    workdir: Path | None = None,
+    warnings: list[str] | None = None,
+) -> None:
     """Extract mono 16-bit PCM at 16 kHz for Whisper and energy analysis."""
-    audio_source = media.audio_url or media.path
-    headers = media.audio_headers if media.audio_url else media.http_headers
+    downloaded = (
+        _download_youtube_audio(media, workdir, warnings)
+        if workdir is not None
+        else None
+    )
+    if downloaded is not None:
+        audio_source: str | Path = downloaded
+        headers: dict[str, str] = {}
+    else:
+        audio_source = media.audio_url or media.path
+        headers = media.audio_headers if media.audio_url else media.http_headers
+
     cmd = _ffmpeg_base(ffmpeg) + _header_option(headers) + [
         "-i", str(audio_source),
         "-map", "0:a:0",
@@ -672,7 +737,11 @@ def extract_audio(media: MediaInfo, wav_path: Path, ffmpeg: str) -> None:
         "-c:a", "pcm_s16le",
         str(wav_path),
     ]
-    run_process(cmd, "Extracting audio")
+    try:
+        run_process(cmd, "Extracting audio")
+    finally:
+        if downloaded is not None:
+            downloaded.unlink(missing_ok=True)
     if not wav_path.exists() or wav_path.stat().st_size < 128:
         raise ClipperError(
             "Audio extraction produced an empty file. The source file may be corrupted."
@@ -2071,8 +2140,10 @@ def create_clips(
         wav_path = work_root / "audio.wav"
 
         if progress:
-            progress(0.06, "Extracting audio…")
-        extract_audio(media, wav_path, ffmpeg)
+            progress(0.06, "Fetching audio…")
+        extract_audio(
+            media, wav_path, ffmpeg, workdir=work_root, warnings=warnings
+        )
 
         if progress:
             progress(0.10, "Measuring audio energy…")

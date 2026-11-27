@@ -78,6 +78,9 @@ Notes:
   the transcript language.
 - Only the audio track (a few MB) and small frame samples are written to a
   temporary directory, which is deleted after the run. No video file is saved.
+- Audio is fetched in 1 MB chunks via yt-dlp to avoid YouTube's per-connection
+  throttle, which can otherwise reduce a long download to ~30–80 KB/s even on a
+  fast connection.
 - Single finished videos only; playlists and live streams are rejected with a
   clear message.
 - Only public videos your network can reach are supported. Respect YouTube's
