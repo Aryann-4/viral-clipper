@@ -320,8 +320,11 @@ def _ffmpeg_base(ffmpeg: str) -> list[str]:
 
 
 YOUTUBE_URL_RE = re.compile(
-    r"^(?:https?://)?(?:www\.|m\.)?"
-    r"(?:youtube\.com/(?:watch\?|shorts/|embed/|live/|replay/)|youtu\.be/)",
+    r"^(?:https?://)?"
+    r"(?:(?:www\.|m\.|music\.)?"
+    r"youtube\.com/(?:watch\?|shorts/|embed/|live/|replay/|clip/|playlist\?)"
+    r"|youtu\.be/"
+    r"|(?:www\.)?youtube-nocookie\.com/embed/)",
     re.IGNORECASE,
 )
 
@@ -496,20 +499,44 @@ def _format_headers(fmt: dict[str, Any], info: dict[str, Any]) -> dict[str, str]
 
 
 def _video_format_rank(fmt: dict[str, Any]) -> tuple[Any, ...]:
-    height = min(int(fmt.get("height") or 0), 1080)
+    height = int(fmt.get("height") or 0)
     codec = str(fmt.get("vcodec") or "")
     return (
-        height,
+        # Prefer a native 1080p or smaller stream; don't fetch 1440p/2160p
+        # ranges only to downscale them afterwards.
+        1 if 0 < height <= 1080 else 0,
+        min(height, 1080),
         codec.startswith(("avc1", "h264")),
         float(fmt.get("fps") or 0),
         float(fmt.get("tbr") or 0),
     )
 
 
-def _audio_format_rank(fmt: dict[str, Any]) -> tuple[Any, ...]:
+def _is_original_audio(fmt: dict[str, Any], info: dict[str, Any]) -> bool:
+    """Return True for the original language track, not a YouTube auto-dub."""
+    note = str(fmt.get("format_note") or "").lower()
+    language = str(fmt.get("language") or "").lower()
+    source_language = str(info.get("language") or "").lower()
+    if "original" in note or "default" in note:
+        return True
+    if source_language and language:
+        return (
+            language == source_language
+            or language.split("-")[0] == source_language.split("-")[0]
+        )
+    # With no language metadata at all, treat the track as the original.
+    return not language
+
+
+def _audio_format_rank(
+    fmt: dict[str, Any], info: dict[str, Any]
+) -> tuple[Any, ...]:
     codec = str(fmt.get("acodec") or "")
     format_id = str(fmt.get("format_id") or "").lower()
     return (
+        # Auto-dubbed tracks are common on YouTube; never let a slightly higher
+        # bitrate override the original/default language audio.
+        _is_original_audio(fmt, info),
         "-drc" not in format_id,
         "mp4a" in codec or str(fmt.get("ext") or "") == "m4a",
         float(fmt.get("tbr") or 0),
@@ -529,24 +556,38 @@ def _pick_youtube_formats(
             "Try a different, non-live video."
         )
 
-    progressive = [
-        fmt for fmt in formats
-        if _has_stream(fmt, "vcodec") and _has_stream(fmt, "acodec")
-    ]
-    if progressive:
-        return max(progressive, key=_video_format_rank), None
-
     videos = [fmt for fmt in formats if _has_stream(fmt, "vcodec")]
+    if not videos:
+        raise ClipperError(
+            "This YouTube video does not expose a video stream. "
+            "Try a standard uploaded video rather than a live stream."
+        )
+
+    # Pick the best video across both adaptive and muxed formats. A muxed
+    # 360p/720p stream should never hide a 1080p adaptive stream.
+    best_video = max(videos, key=_video_format_rank)
+    if _has_stream(best_video, "acodec"):
+        return best_video, None
+
     audios = [
         fmt for fmt in formats
         if _has_stream(fmt, "acodec") and not _has_stream(fmt, "vcodec")
     ]
-    if not videos or not audios:
-        raise ClipperError(
-            "This YouTube video only exposes incomplete streams. "
-            "Try a standard uploaded video rather than a live stream."
+    if audios:
+        return (
+            best_video,
+            max(audios, key=lambda fmt: _audio_format_rank(fmt, info)),
         )
-    return max(videos, key=_video_format_rank), max(audios, key=_audio_format_rank)
+
+    # No standalone audio track: fall back to the best muxed format.
+    progressive = [fmt for fmt in videos if _has_stream(fmt, "acodec")]
+    if progressive:
+        return max(progressive, key=_video_format_rank), None
+
+    raise ClipperError(
+        "This YouTube video only exposes incomplete streams. "
+        "Try a standard uploaded video rather than a live stream."
+    )
 
 
 def resolve_youtube_source(url: str, ffprobe: str) -> MediaInfo:
@@ -583,6 +624,17 @@ def resolve_youtube_source(url: str, ffprobe: str) -> MediaInfo:
         raise ClipperError("Live streams are not supported. Use a finished video.")
 
     video_fmt, audio_fmt = _pick_youtube_formats(info)
+    LOG.info(
+        "YouTube stream resolved (streaming; full video is not downloaded): "
+        "video=%s%s",
+        video_fmt.get("format_id"),
+        (
+            f", audio={audio_fmt.get('format_id')} "
+            f"[{audio_fmt.get('language') or 'original'}]"
+            if audio_fmt
+            else " (muxed audio)"
+        ),
+    )
     video_headers = _format_headers(video_fmt, info)
     audio_headers = _format_headers(audio_fmt, info) if audio_fmt else {}
     title = str(info.get("title") or info.get("id") or "youtube-video")

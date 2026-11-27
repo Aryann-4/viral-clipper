@@ -67,13 +67,17 @@ python app.py --cli --youtube "https://www.youtube.com/watch?v=VIDEO_ID" --clips
 python app.py --cli --input "https://youtu.be/VIDEO_ID" --duration 45 --clips 2
 ```
 
-In the Gradio UI, paste the link into **"…or paste a YouTube URL"** and press
-**Find & render highlights**. The URL takes precedence over a local path or
-uploaded file.
+In the Gradio UI, open the **▶️ YouTube URL** tab under **"1. Choose your
+source"**, paste the link, and press **Find & render highlights**. The URL takes
+precedence over a local path or uploaded file.
 
 Notes:
 
 - Requires `yt-dlp` (included in `requirements.txt`) and internet access.
+- Prefers the original/default audio track, so YouTube auto-dubs do not change
+  the transcript language.
+- Only the audio track (a few MB) and small frame samples are written to a
+  temporary directory, which is deleted after the run. No video file is saved.
 - Single finished videos only; playlists and live streams are rejected with a
   clear message.
 - Only public videos your network can reach are supported. Respect YouTube's
@@ -92,6 +96,7 @@ viral-clipper/
 ├── requirements.txt            # Python dependencies (all free/open source)
 ├── README.md
 ├── .gitignore
+├── tests/                      # Offline regression tests
 ├── docs/                       # Browser-only GitHub Pages site
 │   ├── index.html              # Interactive browser app UI
 │   ├── app.js                  # Browser runtime: WASM FFmpeg + Transformers.js
@@ -108,6 +113,15 @@ At runtime the following local cache/output locations are also used:
 ~/.cache/viral-clipper/whisper/   # faster-whisper model cache
 output_clips/                     # clips, captions and manifest
 ```
+
+## Tests
+
+```bash
+python -m unittest discover -s tests
+```
+
+The tests are offline: they cover YouTube URL detection and original-audio /
+resolution selection without contacting YouTube.
 
 ---
 
