@@ -74,7 +74,7 @@ LOG = logging.getLogger("viral-clipper")
 
 SUPPORTED_DURATIONS = (30, 45, 60)
 SUPPORTED_MODELS = ("base", "small")
-SUPPORTED_LAYOUTS = ("full", "split")
+SUPPORTED_LAYOUTS = ("full", "split", "template")
 MAX_CLIP_COUNT = 5
 TARGET_WIDTH = 1080
 TARGET_HEIGHT = 1920
@@ -84,6 +84,15 @@ OUTPUT_FPS = 30
 SPLIT_TOP_HEIGHT = 920
 SPLIT_BOTTOM_HEIGHT = TARGET_HEIGHT - SPLIT_TOP_HEIGHT
 SPLIT_CAPTION_Y = SPLIT_TOP_HEIGHT + 40
+# Styled "viral template" layout, measured from the reference 900x1600 frame:
+# streamer band ~32.5%, headline at the seam, huge quote in the gameplay area,
+# small live subtitle bottom-left, optional brand image bottom-right.
+TEMPLATE_TOP_HEIGHT = 624
+TEMPLATE_BOTTOM_HEIGHT = TARGET_HEIGHT - TEMPLATE_TOP_HEIGHT
+TEMPLATE_SEAM_Y = TEMPLATE_TOP_HEIGHT
+TEMPLATE_HEADLINE_Y = 600
+TEMPLATE_QUOTE_Y = 810
+TEMPLATE_BRAND_WIDTH = 0.40
 CAPTION_FONT = os.environ.get("VIRAL_CLIPPER_FONT", "Arial")
 DEFAULT_OLLAMA_URL = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 
@@ -230,6 +239,11 @@ class ClipSettings:
     # Normalized (x, y, width, height) of the streamer webcam inside the source.
     # Only used by the split layout; detected automatically when omitted.
     facecam_crop: tuple[float, float, float, float] | None = None
+    # Optional text/overlay controls for the styled template layout.
+    headline: str | None = None
+    quote: str | None = None
+    brand_image: Path | None = None
+    brand_width: float = TEMPLATE_BRAND_WIDTH
     burn_captions: bool = True
     device_preference: str = "auto"
     compute_type: str = "auto"
@@ -2018,6 +2032,207 @@ def _caption_groups(
     return groups
 
 
+def _template_text(text: str | None) -> str:
+    """Normalize generated text and strip bracketed non-speech tags."""
+    value = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", text or "")
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def auto_headline(text: str | None, max_chars: int = 54) -> str:
+    """Build a short sentence-case headline from the clip transcript."""
+    value = _template_text(text)
+    if not value:
+        return "WATCH THIS"
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", value) if s.strip()]
+    headline = sentences[0] if sentences else value
+    if len(headline) < 18 and len(sentences) > 1:
+        headline = f"{headline} {sentences[1]}"
+    headline = headline.strip(" .,!?:;-")
+    if len(headline) > max_chars:
+        headline = headline[:max_chars].rsplit(" ", 1)[0].strip(" .,!?:;-")
+    if not headline:
+        return "WATCH THIS"
+    return headline[0].upper() + headline[1:]
+
+
+def auto_quote(text: str | None, max_chars: int = 30) -> str:
+    """Pick the most dramatic short phrase from the clip transcript."""
+    value = _template_text(text)
+    if not value:
+        return "WAIT FOR IT"
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", value) if s.strip()]
+    if not sentences:
+        sentences = [value]
+    highlight_words = HOOK_WORDS | VALUE_WORDS | EMOTION_WORDS
+
+    def score(sentence: str) -> float:
+        words = [w.lower() for w in WORD_TOKEN_RE.findall(sentence)]
+        keyword_hits = sum(1 for w in words if w in highlight_words)
+        return keyword_hits * 3.0 + sentence.count("!") * 2.0 + min(len(words), 12) / 12.0
+
+    best = max(sentences, key=score)
+    words = WORD_TOKEN_RE.findall(best)
+    while words and words[0].lower() in FILLER_WORDS:
+        words.pop(0)
+    phrase = " ".join(words) if words else best
+    phrase = phrase.strip(" .,;:-")
+    if len(phrase) > max_chars:
+        phrase = phrase[:max_chars].rsplit(" ", 1)[0].strip(" .,;:-")
+    if not phrase:
+        phrase = auto_headline(value, max_chars)
+    if best.rstrip().endswith(("!", "?", ".")):
+        phrase += best.rstrip()[-1]
+    return phrase.upper()
+
+
+def _wrap_text_lines(text: str, max_chars: int, max_lines: int = 2) -> list[str]:
+    """Greedy word wrap for overlay text."""
+    words = _template_text(text).split()
+    if not words:
+        return []
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if not current or len(candidate) <= max_chars:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    if len(lines) > max_lines:
+        kept = lines[: max_lines - 1]
+        remainder = " ".join(lines[max_lines - 1 :])
+        if len(remainder) > max_chars - 1:
+            remainder = remainder[: max_chars - 1].rsplit(" ", 1)[0].rstrip()
+        kept.append(remainder.rstrip() + "…")
+        lines = kept
+    return lines
+
+
+_ASS_WHITE = r"{\c&H00FFFFFF&}"
+_ASS_YELLOW = r"{\c&H0000FFFF&}"
+_ASS_CYAN = r"{\c&H00FFE500&}"
+_ASS_BLUE = r"{\c&H00FFA800&}"
+_ASS_RESET = r"{\c&H00FFFFFF&}"
+
+
+def _headline_ass_text(headline: str) -> str:
+    """Style the headline with one high-value word in blue."""
+    lines = _wrap_text_lines(headline, 26, 2)
+    if not lines:
+        return ""
+    highlight_words = HOOK_WORDS | VALUE_WORDS | EMOTION_WORDS | {"shoot", "kill", "gun"}
+    candidates: list[tuple[int, str]] = []
+    for line in lines:
+        for token in line.split():
+            clean = re.sub(r"[^A-Za-z0-9']+", "", token).lower()
+            if len(clean) >= 3 and clean not in FILLER_WORDS:
+                priority = 2 if clean in highlight_words else 1 if len(clean) >= 6 else 0
+                candidates.append((priority, clean))
+    highlighted = ""
+    if candidates:
+        candidates.sort(key=lambda item: (-item[0], -len(item[1])))
+        highlighted = candidates[0][1]
+    rendered: list[str] = []
+    used_highlight = False
+    for line in lines:
+        tokens: list[str] = []
+        for token in line.split():
+            clean = re.sub(r"[^A-Za-z0-9']+", "", token).lower()
+            if not used_highlight and highlighted and clean == highlighted:
+                tokens.append(_ASS_BLUE + _ass_escape(token) + _ASS_RESET)
+                used_highlight = True
+            else:
+                tokens.append(_ass_escape(token))
+        rendered.append(" ".join(tokens))
+    return r"\N".join(rendered)
+
+
+def _quote_ass_text(quote: str) -> str:
+    """Style the big quote with cycling white / yellow / cyan words."""
+    lines = _wrap_text_lines(quote, 14, 2)
+    colors = (_ASS_WHITE, _ASS_YELLOW, _ASS_CYAN)
+    rendered: list[str] = []
+    index = 0
+    for line in lines:
+        tokens: list[str] = []
+        for token in line.split():
+            tokens.append(colors[index % len(colors)] + _ass_escape(token) + _ASS_RESET)
+            index += 1
+        rendered.append(" ".join(tokens))
+    return r"\N".join(rendered)
+
+
+def build_template_ass_captions(
+    words: list[Word],
+    clip_start: float,
+    clip_duration: float,
+    destination: Path,
+    *,
+    headline: str,
+    quote: str,
+    font_name: str = CAPTION_FONT,
+) -> Path:
+    """Write the styled template: headline, big quote, and small live subtitle."""
+    headline_text = _headline_ass_text(headline)
+    quote_text = _quote_ass_text(quote)
+    events: list[str] = []
+    start_ts = _ass_time(0.0)
+    end_ts = _ass_time(clip_duration)
+    if headline_text:
+        events.append(
+            f"Dialogue: 0,{start_ts},{end_ts},Headline,,0,0,0,,"
+            f"{{\\pos({TARGET_WIDTH // 2},{TEMPLATE_HEADLINE_Y})}}{headline_text}"
+        )
+    if quote_text:
+        events.append(
+            f"Dialogue: 0,{start_ts},{end_ts},Quote,,0,0,0,,"
+            f"{{\\pos({TARGET_WIDTH // 2},{TEMPLATE_QUOTE_Y})}}{quote_text}"
+        )
+
+    groups = _caption_groups(
+        words, clip_start, clip_duration, max_words=9, max_chars=44, max_seconds=5.5
+    )
+    previous_cue_end = 0.0
+    for group in groups:
+        if not group:
+            continue
+        cue_start = max(0.0, group[0].start - 0.04, previous_cue_end)
+        cue_end = min(clip_duration, group[-1].end + 0.20)
+        if cue_end <= cue_start:
+            continue
+        line = " ".join(_ass_escape(item.text) for item in group)
+        if line:
+            events.append(
+                f"Dialogue: 0,{_ass_time(cue_start)},{_ass_time(cue_end)},Sub,,0,0,0,,{line}"
+            )
+        previous_cue_end = cue_end
+
+    header = f"""[Script Info]
+; Generated by Viral Clip Forge
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+YCbCr Matrix: TV.709
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Headline,{font_name},56,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,7,3,5,50,50,0,1
+Style: Quote,{font_name},118,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,11,4,5,20,20,0,1
+Style: Sub,{font_name},36,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,4,1,1,100,440,110,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    destination.write_text(header + "\n".join(events) + "\n", encoding="utf-8")
+    return destination
+
+
 def build_ass_captions(
     words: list[Word],
     clip_start: float,
@@ -2105,19 +2320,25 @@ def _write_filter_script(
     *,
     layout: str = "full",
     facecam_pixels: tuple[int, int, int, int] | None = None,
+    brand_input: int | None = None,
+    brand_width: float = TEMPLATE_BRAND_WIDTH,
 ) -> Path:
-    if layout == "split":
+    if layout in ("split", "template"):
         if facecam_pixels is None:
-            raise ClipperError("Split layout requires a streamer webcam crop.")
+            raise ClipperError("Split/template layout requires a streamer webcam crop.")
         x, y, w, h = facecam_pixels
+        top_height = (
+            TEMPLATE_TOP_HEIGHT if layout == "template" else SPLIT_TOP_HEIGHT
+        )
+        bottom_height = TARGET_HEIGHT - top_height
         filters = (
             "[0:v]split=2[top][bot];"
             f"[top]crop=w={w}:h={h}:x={x}:y={y},"
-            f"scale={TARGET_WIDTH}:{SPLIT_TOP_HEIGHT}:force_original_aspect_ratio=increase,"
-            f"crop={TARGET_WIDTH}:{SPLIT_TOP_HEIGHT},setsar=1[topv];"
+            f"scale={TARGET_WIDTH}:{top_height}:force_original_aspect_ratio=increase,"
+            f"crop={TARGET_WIDTH}:{top_height},setsar=1[topv];"
             "[bot]"
-            f"scale={TARGET_WIDTH}:{SPLIT_BOTTOM_HEIGHT}:force_original_aspect_ratio=increase,"
-            f"crop={TARGET_WIDTH}:{SPLIT_BOTTOM_HEIGHT},setsar=1[botv];"
+            f"scale={TARGET_WIDTH}:{bottom_height}:force_original_aspect_ratio=increase,"
+            f"crop={TARGET_WIDTH}:{bottom_height},setsar=1[botv];"
             f"[topv][botv]vstack=inputs=2,fps={OUTPUT_FPS},format=yuv420p"
         )
     else:
@@ -2133,7 +2354,15 @@ def _write_filter_script(
         # caption_file is a relative filename inside the per-clip workdir, so
         # no path escaping is needed inside the filtergraph.
         filters += f",ass=filename='{caption_file.name}'"
-    filters += "[v]\n"
+    if brand_input is None:
+        filters += "[v]\n"
+    else:
+        brand_px = max(32, int(round(TARGET_WIDTH * brand_width)))
+        filters += (
+            "[v];"
+            f"[{brand_input}:v]scale={brand_px}:-2[brand];"
+            "[v][brand]overlay=W-w:H-h[vout]\n"
+        )
     script_path = workdir / "filters.txt"
     script_path.write_text(filters, encoding="utf-8")
     return script_path
@@ -2152,10 +2381,18 @@ def _render_once(
     *,
     layout: str = "full",
     facecam_pixels: tuple[int, int, int, int] | None = None,
+    brand_image: Path | None = None,
+    brand_width: float = TEMPLATE_BRAND_WIDTH,
 ) -> None:
+    has_separate_audio = bool(
+        media.audio_url and str(media.audio_url) != str(media.path)
+    )
+    brand_input = (2 if has_separate_audio else 1) if brand_image else None
     filter_script = _write_filter_script(
         workdir, caption_file, x_expression,
         layout=layout, facecam_pixels=facecam_pixels,
+        brand_input=brand_input,
+        brand_width=brand_width,
     )
     fade_start = max(0.0, duration - 0.10)
     audio_filter = (
@@ -2169,16 +2406,19 @@ def _render_once(
         "-i", str(media.path),
     ]
     audio_input = 0
-    if media.audio_url and str(media.audio_url) != str(media.path):
+    if has_separate_audio:
         inputs += _header_option(media.audio_headers) + [
             "-ss", f"{candidate.start:.3f}",
             "-i", media.audio_url,
         ]
         audio_input = 1
+    if brand_image is not None:
+        inputs += ["-i", str(brand_image)]
+    video_map = "[vout]" if brand_image is not None else "[v]"
     cmd = _ffmpeg_base(ffmpeg) + inputs + [
         "-t", f"{duration:.3f}",
         "-filter_complex_script", str(filter_script),
-        "-map", "[v]",
+        "-map", video_map,
         "-map", f"{audio_input}:a:0",
         "-af", audio_filter,
         "-c:v", "libx264",
@@ -2251,37 +2491,60 @@ def render_clip(
     output_path = output_dir / f"{clip_stem}.mp4"
     caption_output = output_dir / f"{clip_stem}.ass" if settings.burn_captions else None
 
+    layout = settings.layout
     caption_work_file: Path | None = None
-    if settings.burn_captions:
+    needs_ass = bool(settings.burn_captions or layout == "template")
+    if needs_ass:
         if not _filter_available(ffmpeg, "ass"):
             raise ClipperError(
                 "This FFmpeg build does not include the libass `ass` filter, which is "
-                "required to burn styled captions. Install a full FFmpeg build "
+                "required for captions/template text. Install a full FFmpeg build "
                 "(e.g. `sudo apt install ffmpeg` on Ubuntu)."
             )
-        caption_work_file = build_ass_captions(
-            words, clip_start, duration, workdir / "captions.ass",
-            font_name=CAPTION_FONT,
-            caption_y=SPLIT_CAPTION_Y if settings.layout == "split" else None,
-        )
+        if layout == "template":
+            headline = (settings.headline or "").strip() or auto_headline(candidate.text)
+            quote = (settings.quote or "").strip() or auto_quote(candidate.text)
+            caption_work_file = build_template_ass_captions(
+                words, clip_start, duration, workdir / "captions.ass",
+                headline=headline, quote=quote, font_name=CAPTION_FONT,
+            )
+        else:
+            caption_work_file = build_ass_captions(
+                words, clip_start, duration, workdir / "captions.ass",
+                font_name=CAPTION_FONT,
+                caption_y=SPLIT_CAPTION_Y if layout == "split" else None,
+            )
 
-    layout = settings.layout
+    brand_image: Path | None = None
+    if settings.brand_image:
+        candidate_brand = Path(settings.brand_image).expanduser()
+        if candidate_brand.is_file():
+            brand_image = candidate_brand
+        else:
+            warning = (
+                f"Brand image not found at {candidate_brand}; "
+                "rendering without the brand overlay."
+            )
+            LOG.warning(warning)
+            warnings.append(warning)
+
     facecam_pixels: tuple[int, int, int, int] | None = None
     facecam_box: tuple[float, float, float, float] | None = None
-    if layout == "split":
+    if layout in ("split", "template"):
         facecam_box = settings.facecam_crop or detect_facecam_crop(
             media, clip_start, duration, workdir, ffmpeg, settings, warnings
         )
         if facecam_box is None:
             raise ClipperError(
-                "Could not auto-detect the streamer webcam for the split layout. "
+                "Could not auto-detect the streamer webcam for this layout. "
                 "Re-run with a manual webcam crop in `x,y,w,h` normalized "
                 "coordinates (for example `0.70,0.55,0.28,0.40`), or use the "
                 "full-frame layout."
             )
         facecam_pixels = _facecam_pixels(media, facecam_box)
         LOG.info(
-            "Split layout clip %s: webcam crop %s px", clip_rank, facecam_pixels
+            "%s layout clip %s: webcam crop %s px",
+            layout, clip_rank, facecam_pixels,
         )
 
     face_path: np.ndarray | None = None
@@ -2312,6 +2575,7 @@ def render_clip(
                              sentence_end=candidate.sentence_end),
             output_path, workdir, ffmpeg, ffprobe, caption_work_file, x_expression,
             duration, layout=layout, facecam_pixels=facecam_pixels,
+            brand_image=brand_image, brand_width=settings.brand_width,
         )
         actual_face_tracking = face_path is not None
     except ClipperError as first_error:
@@ -2337,6 +2601,7 @@ def render_clip(
             output_path, workdir, ffmpeg, ffprobe, caption_work_file,
             "max(0,(in_w-1080)/2)", duration,
             layout=layout, facecam_pixels=facecam_pixels,
+            brand_image=brand_image, brand_width=settings.brand_width,
         )
         actual_face_tracking = False
 
@@ -2414,6 +2679,19 @@ def create_clips(
         settings.facecam_crop = parse_facecam_crop(settings.facecam_crop)
     except ValueError as exc:
         raise ClipperError(str(exc)) from exc
+    settings.headline = (settings.headline or "").strip() or None
+    settings.quote = (settings.quote or "").strip() or None
+    if settings.brand_image:
+        brand_path = Path(settings.brand_image).expanduser()
+        if not brand_path.is_file():
+            raise ClipperError(f"Brand image not found: {brand_path}")
+        settings.brand_image = brand_path
+    try:
+        settings.brand_width = float(settings.brand_width)
+    except (TypeError, ValueError) as exc:
+        raise ClipperError("Brand width must be a number between 0.05 and 0.9.") from exc
+    if not 0.05 <= settings.brand_width <= 0.9:
+        raise ClipperError("Brand width must be between 0.05 and 0.9 of the frame.")
 
     output_dir = Path(settings.output_dir).expanduser().resolve()
     try:
@@ -2511,7 +2789,7 @@ def create_clips(
                 "or target duration to get more."
             )
 
-        if settings.layout == "split" and settings.facecam_crop is None:
+        if settings.layout in ("split", "template") and settings.facecam_crop is None:
             if progress:
                 progress(0.73, "Detecting the streamer webcam…")
             detected_crop = detect_facecam_crop(
@@ -2520,7 +2798,7 @@ def create_clips(
             )
             if detected_crop is None:
                 raise ClipperError(
-                    "Could not auto-detect the streamer webcam for the split layout. "
+                    "Could not auto-detect the streamer webcam for this layout. "
                     "Re-run with a manual webcam crop in `x,y,w,h` normalized "
                     "coordinates (for example `0.70,0.55,0.28,0.40`), or use the "
                     "full-frame layout."
@@ -2572,6 +2850,12 @@ def create_clips(
                         if settings.facecam_crop
                         else None
                     ),
+                    "headline": settings.headline,
+                    "quote": settings.quote,
+                    "brand_image": (
+                        str(settings.brand_image) if settings.brand_image else None
+                    ),
+                    "brand_width": round(settings.brand_width, 3),
                     "burn_captions": settings.burn_captions,
                     "compute_type": settings.compute_type,
                     "ollama_model": settings.ollama_model,
@@ -2686,15 +2970,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--layout", choices=SUPPORTED_LAYOUTS, default="full",
         help=(
             "full = one full-frame vertical crop; split = streamer webcam on "
-            "top with the gameplay frame below."
+            "top with the gameplay frame below; template = styled viral layout "
+            "with headline, big quote, live subtitle, and optional branding."
         ),
     )
     parser.add_argument(
         "--facecam-crop", default=None, metavar="X,Y,W,H",
         help=(
-            "Manual streamer webcam crop for --layout split, in normalized "
-            "0–1 coordinates (e.g. 0.70,0.55,0.28,0.40). Auto-detected when omitted."
+            "Manual streamer webcam crop for --layout split/template, in "
+            "normalized 0–1 coordinates (e.g. 0.70,0.55,0.28,0.40). "
+            "Auto-detected when omitted."
         ),
+    )
+    parser.add_argument(
+        "--headline", default=None,
+        help=(
+            "Headline shown at the seam in --layout template. "
+            "Generated from the transcript when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--quote", default=None,
+        help=(
+            "Big quote shown in the gameplay area in --layout template. "
+            "Generated from the transcript when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--brand-image", type=Path, default=None,
+        help="Optional PNG/WebP overlay shown bottom-right in --layout template.",
+    )
+    parser.add_argument(
+        "--brand-width", type=float, default=TEMPLATE_BRAND_WIDTH,
+        help="Brand overlay width as a fraction of the 1080 px frame (default 0.40).",
     )
     parser.add_argument(
         "--no-captions", action="store_true", help="Render without burned-in captions."
@@ -2756,6 +3064,10 @@ def run_cli(args: argparse.Namespace) -> int:
         crop_mode=args.crop,
         layout=args.layout,
         facecam_crop=facecam_crop,
+        headline=args.headline,
+        quote=args.quote,
+        brand_image=args.brand_image,
+        brand_width=args.brand_width,
         burn_captions=not args.no_captions,
         device_preference=args.device,
         compute_type=args.compute_type,
@@ -2916,17 +3228,19 @@ def launch_ui(args: argparse.Namespace) -> int:
                     choices=[
                         ("Full frame", "full"),
                         ("Split: streamer top / gameplay bottom", "split"),
+                        ("Viral template: headline + big quote + brand", "template"),
                     ],
                     value="full",
                     label="Clip layout",
                     info=(
-                        "Split mirrors gaming Shorts: a streamer webcam crop on "
-                        "top and the full gameplay frame below."
+                        "Template mirrors gaming Shorts: a smaller streamer band, "
+                        "headline at the seam, big colored quote, live subtitle, "
+                        "and an optional brand overlay."
                     ),
                 )
                 facecam_crop = gr.Textbox(
                     value="",
-                    label="Streamer webcam crop (optional, split layout)",
+                    label="Streamer webcam crop (optional, split/template)",
                     placeholder="0.70,0.55,0.28,0.40",
                     info=(
                         "Normalized x,y,w,h of the webcam in the source. "
@@ -2952,6 +3266,31 @@ def launch_ui(args: argparse.Namespace) -> int:
                         choices=[("Face-aware", "face"), ("Center", "center")],
                         value="face",
                         label="Vertical reframing (full-frame layout)",
+                    )
+                    headline = gr.Textbox(
+                        value="",
+                        label="Template headline (optional)",
+                        placeholder="Generated from the transcript when empty",
+                        info="Shown at the seam in the viral template layout.",
+                        lines=1,
+                    )
+                    quote = gr.Textbox(
+                        value="",
+                        label="Template big quote (optional)",
+                        placeholder="Generated from the transcript when empty",
+                        info="Shown in the gameplay area in the viral template layout.",
+                        lines=2,
+                    )
+                    brand_image = gr.File(
+                        label="Brand overlay image (optional, template layout)",
+                        file_types=["image", ".png", ".webp"],
+                        type="filepath",
+                        file_count="single",
+                    )
+                    brand_width = gr.Slider(
+                        minimum=0.10, maximum=0.80, step=0.01,
+                        value=TEMPLATE_BRAND_WIDTH,
+                        label="Brand overlay width (fraction of frame)",
                     )
                     burn_captions = gr.Checkbox(
                         value=True, label="Burn in bold captions"
@@ -3017,6 +3356,10 @@ def launch_ui(args: argparse.Namespace) -> int:
             reframing: str,
             clip_layout: str,
             webcam_crop_text: str,
+            headline_text: str,
+            quote_text: str,
+            brand_file: Any,
+            brand_width_value: float,
             captions_enabled: bool,
             whisper_device: str,
             ollama_enabled: bool,
@@ -3052,6 +3395,13 @@ def launch_ui(args: argparse.Namespace) -> int:
                 crop_mode=reframing,
                 layout=clip_layout or "full",
                 facecam_crop=webcam_crop,
+                headline=(headline_text or "").strip() or None,
+                quote=(quote_text or "").strip() or None,
+                brand_image=(
+                    Path(brand_file.name if hasattr(brand_file, "name") else brand_file)
+                    if brand_file else None
+                ),
+                brand_width=float(brand_width_value or TEMPLATE_BRAND_WIDTH),
                 burn_captions=bool(captions_enabled),
                 device_preference=whisper_device,
                 ollama_model=(ollama_name.strip() if ollama_enabled and ollama_name else None),
@@ -3124,7 +3474,8 @@ def launch_ui(args: argparse.Namespace) -> int:
             fn=handle_run,
             inputs=[
                 upload, local_path, youtube_url, duration, clip_count, model_size,
-                language, crop_mode, layout, facecam_crop, burn_captions, device,
+                language, crop_mode, layout, facecam_crop, headline, quote,
+                brand_image, brand_width, burn_captions, device,
                 use_ollama, ollama_model,
             ],
             outputs=[status, gallery, downloads, details],

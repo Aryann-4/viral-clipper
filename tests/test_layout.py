@@ -112,6 +112,39 @@ class StableFaceClusterTests(unittest.TestCase):
         self.assertIsNone(app._stable_face_cluster([], 20))
 
 
+class TemplateLayoutTests(unittest.TestCase):
+    def test_template_filter_uses_smaller_top_band_and_brand(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = app._write_filter_script(
+                Path(tmp), None, "0", layout="template",
+                facecam_pixels=(10, 20, 300, 200), brand_input=1, brand_width=0.35,
+            )
+            text = script.read_text(encoding="utf-8")
+            self.assertIn(f"crop={app.TARGET_WIDTH}:{app.TEMPLATE_TOP_HEIGHT}", text)
+            self.assertIn("overlay=W-w:H-h[vout]", text)
+
+    def test_template_caption_contains_headline_quote_and_subtitle(self):
+        words = [app.Word(0.2, 0.8, "HELLO"), app.Word(0.9, 1.4, "WORLD")]
+        with tempfile.TemporaryDirectory() as tmp:
+            p = app.build_template_ass_captions(
+                words, 0.0, 2.0, Path(tmp) / "c.ass",
+                headline="Test headline", quote="BIG QUOTE!",
+            )
+            text = p.read_text(encoding="utf-8")
+            self.assertIn("Style: Headline", text)
+            self.assertIn("Style: Quote", text)
+            self.assertIn("Style: Sub", text)
+            self.assertIn("BIG", text)
+            self.assertIn("QUOTE", text)
+
+    def test_auto_helpers_return_non_empty_text(self):
+        h = app.auto_headline("Kai tells fugitives to shoot and shoot yourselves")
+        q = app.auto_quote("Kai tells fugitives to shoot and shoot yourselves")
+        self.assertTrue(h)
+        self.assertTrue(q)
+        self.assertLessEqual(len(app._wrap_text_lines(q, 14, 2)), 2)
+
+
 class SplitCaptionTests(unittest.TestCase):
     def test_seam_captions_are_positioned(self):
         words = [app.Word(0.2, 0.8, "HELLO"), app.Word(0.9, 1.4, "WORLD")]

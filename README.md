@@ -276,6 +276,15 @@ python app.py --cli \
   --facecam-crop 0.70,0.55,0.28,0.40 \
   --clips 3
 
+# Styled viral template (headline + big quote + optional brand)
+python app.py --cli \
+  --input stream.mp4 \
+  --layout template \
+  --headline "Kai tells fugitives to shoot" \
+  --quote "SHOOT AND SHOOT YOURSELVES!" \
+  --brand-image ./brand.png \
+  --clips 3
+
 # Optional local LLM reranking
 ollama serve
 ollama pull llama3.2
@@ -311,8 +320,12 @@ score breakdown, transcript snippet, and the manifest location.
 | `--model {base,small}` | faster-whisper model | `base` |
 | `--language CODE` | Force a language, e.g. `en`, `hi`, `es`; omit to auto-detect | auto |
 | `--crop {face,center}` | Reframing strategy | `face` |
-| `--layout {full,split}` | Full-frame clip, or streamer top / gameplay bottom | `full` |
-| `--facecam-crop X,Y,W,H` | Manual streamer webcam crop for `split`, normalized 0–1 | auto-detect |
+| `--layout {full,split,template}` | Full-frame, split, or styled viral template | `full` |
+| `--facecam-crop X,Y,W,H` | Manual streamer webcam crop for split/template, normalized 0–1 | auto-detect |
+| `--headline TEXT` | Template headline at seam | auto |
+| `--quote TEXT` | Template big quote | auto |
+| `--brand-image PATH` | Template bottom-right brand image | none |
+| `--brand-width N` | Brand width as frame fraction (0.05–0.9) | `0.40` |
 | `--no-captions` | Do not burn captions | captions on |
 | `--device {auto,cpu,cuda}` | Whisper device | `auto` |
 | `--compute-type TYPE` | `auto`, `int8`, `float16`, `int8_float16`, `float32` | `auto` |
@@ -395,6 +408,12 @@ Ollama is unavailable the app logs a warning and continues with heuristics.
   wrong area, pass a manual normalized crop with `--facecam-crop x,y,w,h` (or
   the matching field in the UI). Captions straddle the seam between the two
   bands.
+  - **Viral template** (`--layout template`) follows the reference style: a
+    smaller streamer band on top, a headline at the seam, a big
+    white/yellow/cyan quote in the gameplay area, a small live subtitle on the
+    bottom-left, and an optional brand image on the bottom-right. Pass
+    `--headline`, `--quote`, and `--brand-image` to control it, or leave them
+    blank to auto-generate from the clip transcript.
 - Captions are generated as ASS at 1080×1920 with a bold font, thick black
   outline, bottom-center safe-zone margin, short phrases (up to 4 words / 20
   characters / 2.8 s), and the currently spoken word highlighted in yellow.
