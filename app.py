@@ -2851,6 +2851,28 @@ def launch_ui(args: argparse.Namespace) -> int:
                         minimum=1, maximum=MAX_CLIP_COUNT, step=1, value=3,
                         label="Number of clips",
                     )
+                layout = gr.Radio(
+                    choices=[
+                        ("Full frame", "full"),
+                        ("Split: streamer top / gameplay bottom", "split"),
+                    ],
+                    value="full",
+                    label="Clip layout",
+                    info=(
+                        "Split mirrors gaming Shorts: a streamer webcam crop on "
+                        "top and the full gameplay frame below."
+                    ),
+                )
+                facecam_crop = gr.Textbox(
+                    value="",
+                    label="Streamer webcam crop (optional, split layout)",
+                    placeholder="0.70,0.55,0.28,0.40",
+                    info=(
+                        "Normalized x,y,w,h of the webcam in the source. "
+                        "Leave empty to auto-detect the face."
+                    ),
+                    lines=1,
+                )
                 with gr.Accordion("Advanced settings", open=False):
                     model_size = gr.Dropdown(
                         choices=list(SUPPORTED_MODELS), value="base",
@@ -2869,28 +2891,6 @@ def launch_ui(args: argparse.Namespace) -> int:
                         choices=[("Face-aware", "face"), ("Center", "center")],
                         value="face",
                         label="Vertical reframing (full-frame layout)",
-                    )
-                    layout = gr.Radio(
-                        choices=[
-                            ("Full frame", "full"),
-                            ("Split: streamer top / gameplay bottom", "split"),
-                        ],
-                        value="full",
-                        label="Clip layout",
-                        info=(
-                            "Split mirrors gaming Shorts: a streamer webcam crop on "
-                            "top and the full gameplay frame below."
-                        ),
-                    )
-                    facecam_crop = gr.Textbox(
-                        value="",
-                        label="Streamer webcam crop (optional)",
-                        placeholder="0.70,0.55,0.28,0.40",
-                        info=(
-                            "Normalized x,y,w,h of the webcam in the source. "
-                            "Leave empty to auto-detect the face."
-                        ),
-                        lines=1,
                     )
                     burn_captions = gr.Checkbox(
                         value=True, label="Burn in bold captions"
