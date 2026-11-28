@@ -74,10 +74,16 @@ LOG = logging.getLogger("viral-clipper")
 
 SUPPORTED_DURATIONS = (30, 45, 60)
 SUPPORTED_MODELS = ("base", "small")
+SUPPORTED_LAYOUTS = ("full", "split")
 MAX_CLIP_COUNT = 5
 TARGET_WIDTH = 1080
 TARGET_HEIGHT = 1920
 OUTPUT_FPS = 30
+# Split layout: the streamer webcam fills the top band and the gameplay frame
+# fills the bottom band, mirroring the reference Short's ~48/52 stack.
+SPLIT_TOP_HEIGHT = 920
+SPLIT_BOTTOM_HEIGHT = TARGET_HEIGHT - SPLIT_TOP_HEIGHT
+SPLIT_CAPTION_Y = SPLIT_TOP_HEIGHT + 40
 CAPTION_FONT = os.environ.get("VIRAL_CLIPPER_FONT", "Arial")
 DEFAULT_OLLAMA_URL = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 
@@ -220,6 +226,10 @@ class ClipSettings:
     model_size: str = "base"
     language: str | None = None
     crop_mode: str = "face"
+    layout: str = "full"
+    # Normalized (x, y, width, height) of the streamer webcam inside the source.
+    # Only used by the split layout; detected automatically when omitted.
+    facecam_crop: tuple[float, float, float, float] | None = None
     burn_captions: bool = True
     device_preference: str = "auto"
     compute_type: str = "auto"
@@ -243,6 +253,7 @@ class ClipResult:
     text: str
     llm_reason: str
     face_tracked: bool
+    layout: str = "full"
 
 
 @dataclass
@@ -279,6 +290,7 @@ class JobResult:
                     "score": round(c.score, 1),
                     "score_breakdown": {k: round(v, 3) for k, v in c.breakdown.items()},
                     "face_tracked": c.face_tracked,
+                    "layout": c.layout,
                     "reason": c.llm_reason,
                     "transcript": c.text,
                 }
@@ -1683,6 +1695,187 @@ def crop_expression(face_path: np.ndarray | None, sample_fps: float) -> str:
     return f"clip(({centers})*in_w-540,0,in_w-1080)"
 
 
+def parse_facecam_crop(value: Any) -> tuple[float, float, float, float] | None:
+    """Parse a normalized ``x,y,w,h`` webcam crop from text or a sequence."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        parts = [part.strip() for part in text.replace(";", ",").split(",")]
+    else:
+        try:
+            parts = list(value)
+        except TypeError as exc:
+            raise ValueError("Facecam crop must be four numbers: x,y,w,h.") from exc
+    if len(parts) != 4:
+        raise ValueError("Facecam crop must be four numbers: x,y,w,h.")
+    try:
+        numbers = [float(part) for part in parts]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Facecam crop must be four numbers: x,y,w,h.") from exc
+    x, y, width, height = numbers
+    if not all(np.isfinite(numbers)):
+        raise ValueError("Facecam crop values must be finite numbers.")
+    if not (0.0 <= x < 1.0 and 0.0 <= y < 1.0):
+        raise ValueError("Facecam crop x and y must be between 0 and 1.")
+    if width <= 0.02 or height <= 0.02 or width > 1.0 or height > 1.0:
+        raise ValueError("Facecam crop width and height must be between 0.02 and 1.")
+    if x + width > 1.001 or y + height > 1.001:
+        raise ValueError("Facecam crop must fit inside the frame (x+w and y+h <= 1).")
+    return (
+        float(np.clip(x, 0.0, 0.999)),
+        float(np.clip(y, 0.0, 0.999)),
+        float(np.clip(width, 0.02, 1.0)),
+        float(np.clip(height, 0.02, 1.0)),
+    )
+
+
+def _facecam_pixels(
+    media: MediaInfo, box: tuple[float, float, float, float]
+) -> tuple[int, int, int, int]:
+    """Convert a normalized webcam crop to even, in-bounds source pixels."""
+    width, height = max(2, media.width), max(2, media.height)
+    x = int(round(box[0] * width))
+    y = int(round(box[1] * height))
+    w = max(16, int(round(box[2] * width)))
+    h = max(16, int(round(box[3] * height)))
+    w = min(w, width)
+    h = min(h, height)
+    x = max(0, min(x, width - w))
+    y = max(0, min(y, height - h))
+    # yuv420p requires even crop offsets and sizes.
+    w -= w % 2
+    h -= h % 2
+    x -= x % 2
+    y -= y % 2
+    w = max(2, min(w, width - x))
+    h = max(2, min(h, height - y))
+    return x, y, w, h
+
+
+def detect_facecam_crop(
+    media: MediaInfo,
+    start: float,
+    duration: float,
+    workdir: Path,
+    ffmpeg: str,
+    settings: ClipSettings,
+    warnings: list[str],
+) -> tuple[float, float, float, float] | None:
+    """Detect the streamer webcam as a normalized crop around the face.
+
+    The source is assumed to be a gameplay frame with a small webcam overlay.
+    The crop is expanded around the most prominent face so it includes the
+    streamer's head and shoulders rather than a tight face-only zoom.
+    """
+    if duration <= 0.25:
+        return None
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        warning = (
+            "OpenCV is not installed, so the streamer webcam could not be "
+            "auto-detected. Set the webcam crop manually (x,y,w,h)."
+        )
+        LOG.warning(warning)
+        warnings.append(warning)
+        return None
+
+    frames_dir = workdir / "facecam_frames"
+    shutil.rmtree(frames_dir, ignore_errors=True)
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    sample_fps = min(1.0, _effective_face_sample_fps(settings.face_sample_fps, duration))
+    cmd = _ffmpeg_base(ffmpeg) + _header_option(media.http_headers) + [
+        "-ss", f"{max(0.0, start):.3f}",
+        "-i", str(media.path),
+        "-t", f"{duration:.3f}",
+        "-an",
+        "-vf", f"fps={sample_fps},scale=960:-2",
+        "-q:v", "4",
+        str(frames_dir / "frame_%05d.jpg"),
+    ]
+    try:
+        run_process(cmd, "Sampling frames for webcam detection", timeout=300)
+    except ClipperError as exc:
+        warning = f"Webcam detection sampling failed. {exc}"
+        LOG.warning(warning)
+        warnings.append(warning)
+        return None
+
+    frame_files = sorted(frames_dir.glob("frame_*.jpg"))
+    if not frame_files:
+        return None
+    cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
+    cascade = cv2.CascadeClassifier(str(cascade_path))
+    if cascade.empty():
+        warning = "OpenCV face model could not be loaded; webcam auto-detection skipped."
+        LOG.warning(warning)
+        warnings.append(warning)
+        return None
+
+    centers_x: list[float] = []
+    centers_y: list[float] = []
+    face_widths: list[float] = []
+    face_heights: list[float] = []
+    for frame_file in frame_files:
+        frame = cv2.imread(str(frame_file))
+        if frame is None:
+            continue
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(
+            gray, scaleFactor=1.1, minNeighbors=5, minSize=(28, 28)
+        )
+        if len(faces) == 0:
+            continue
+        height, width = frame.shape[:2]
+        best = None
+        best_weight = -1.0
+        for x, y, w, h in faces:
+            cx = (x + w / 2.0) / max(1, width)
+            cy = (y + h / 2.0) / max(1, height)
+            area = (w * h) / float(max(1, width * height))
+            # Prefer large faces near an edge/corner, where webcam overlays live.
+            edge_bias = 1.0 + 0.35 * max(abs(cx - 0.5), abs(cy - 0.5)) * 2.0
+            weight = area * edge_bias
+            if weight > best_weight:
+                best_weight = weight
+                best = (cx, cy, w / max(1, width), h / max(1, height))
+        if best is not None:
+            centers_x.append(best[0])
+            centers_y.append(best[1])
+            face_widths.append(best[2])
+            face_heights.append(best[3])
+
+    if len(centers_x) < max(2, len(frame_files) // 10):
+        LOG.info("No reliable webcam face found.")
+        return None
+
+    cx = float(np.median(centers_x))
+    cy = float(np.median(centers_y))
+    fw = float(np.median(face_widths))
+    fh = float(np.median(face_heights))
+
+    # Expand generously around the face, then force the top band's aspect ratio.
+    target_aspect = TARGET_WIDTH / SPLIT_TOP_HEIGHT
+    box_h = min(1.0, max(fh * 3.4, fw * 2.2 / target_aspect))
+    box_w = box_h * target_aspect
+    if box_w > 1.0:
+        box_w = 1.0
+        box_h = box_w / target_aspect
+    # Bias downward so shoulders are included instead of only headroom.
+    box_x = cx - box_w / 2.0
+    box_y = cy - box_h * 0.42
+    box_x = float(np.clip(box_x, 0.0, 1.0 - box_w))
+    box_y = float(np.clip(box_y, 0.0, 1.0 - box_h))
+    LOG.info(
+        "Webcam crop detected at x=%.3f y=%.3f w=%.3f h=%.3f",
+        box_x, box_y, box_w, box_h,
+    )
+    return (box_x, box_y, float(box_w), float(box_h))
+
+
 # ---------------------------------------------------------------------------
 # ASS caption generation
 # ---------------------------------------------------------------------------
@@ -1771,10 +1964,16 @@ def build_ass_captions(
     destination: Path,
     *,
     font_name: str = CAPTION_FONT,
+    caption_y: int | None = None,
 ) -> Path:
-    """Write bold, short-phrase ASS captions with an active-word highlight."""
+    """Write bold, short-phrase ASS captions with an active-word highlight.
+
+    ``caption_y`` pins captions to a fixed vertical position (used to straddle
+    the seam in the split layout). When omitted, captions sit near the bottom.
+    """
     groups = _caption_groups(words, clip_start, clip_duration)
     events: list[str] = []
+    prefix = f"{{\\pos({TARGET_WIDTH // 2},{int(caption_y)})}}" if caption_y is not None else ""
     previous_cue_end = 0.0
     for group in groups:
         if not group:
@@ -1808,7 +2007,8 @@ def build_ass_captions(
             if line:
                 events.append(
                     "Dialogue: 0,"
-                    f"{_ass_time(event_start)},{_ass_time(event_end)},Viral,,0,0,0,,{line}"
+                    f"{_ass_time(event_start)},{_ass_time(event_end)},Viral,,0,0,0,,"
+                    f"{prefix}{line}"
                 )
         previous_cue_end = cue_end
 
@@ -1823,7 +2023,7 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Viral,{font_name},76,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,7,2,2,70,70,330,1
+Style: Viral,{font_name},76,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,7,2,{5 if caption_y is not None else 2},70,70,{0 if caption_y is not None else 330},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -1841,15 +2041,33 @@ def _write_filter_script(
     workdir: Path,
     caption_file: Path | None,
     x_expression: str,
+    *,
+    layout: str = "full",
+    facecam_pixels: tuple[int, int, int, int] | None = None,
 ) -> Path:
-    filters = (
-        "[0:v]"
-        "scale=1080:1920:force_original_aspect_ratio=increase,"
-        "setsar=1,"
-        f"crop=w=1080:h=1920:x='{x_expression}':y='(ih-1920)/2',"
-        "fps=30,"
-        "format=yuv420p"
-    )
+    if layout == "split":
+        if facecam_pixels is None:
+            raise ClipperError("Split layout requires a streamer webcam crop.")
+        x, y, w, h = facecam_pixels
+        filters = (
+            "[0:v]split=2[top][bot];"
+            f"[top]crop=w={w}:h={h}:x={x}:y={y},"
+            f"scale={TARGET_WIDTH}:{SPLIT_TOP_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={TARGET_WIDTH}:{SPLIT_TOP_HEIGHT},setsar=1[topv];"
+            "[bot]"
+            f"scale={TARGET_WIDTH}:{SPLIT_BOTTOM_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={TARGET_WIDTH}:{SPLIT_BOTTOM_HEIGHT},setsar=1[botv];"
+            f"[topv][botv]vstack=inputs=2,fps={OUTPUT_FPS},format=yuv420p"
+        )
+    else:
+        filters = (
+            "[0:v]"
+            "scale=1080:1920:force_original_aspect_ratio=increase,"
+            "setsar=1,"
+            f"crop=w=1080:h=1920:x='{x_expression}':y='(ih-1920)/2',"
+            "fps=30,"
+            "format=yuv420p"
+        )
     if caption_file is not None:
         # caption_file is a relative filename inside the per-clip workdir, so
         # no path escaping is needed inside the filtergraph.
@@ -1870,8 +2088,14 @@ def _render_once(
     caption_file: Path | None,
     x_expression: str,
     duration: float,
+    *,
+    layout: str = "full",
+    facecam_pixels: tuple[int, int, int, int] | None = None,
 ) -> None:
-    filter_script = _write_filter_script(workdir, caption_file, x_expression)
+    filter_script = _write_filter_script(
+        workdir, caption_file, x_expression,
+        layout=layout, facecam_pixels=facecam_pixels,
+    )
     fade_start = max(0.0, duration - 0.10)
     audio_filter = (
         f"afade=t=in:st=0:d=0.04,"
@@ -1977,11 +2201,35 @@ def render_clip(
         caption_work_file = build_ass_captions(
             words, clip_start, duration, workdir / "captions.ass",
             font_name=CAPTION_FONT,
+            caption_y=SPLIT_CAPTION_Y if settings.layout == "split" else None,
+        )
+
+    layout = settings.layout
+    facecam_pixels: tuple[int, int, int, int] | None = None
+    facecam_box: tuple[float, float, float, float] | None = None
+    if layout == "split":
+        facecam_box = settings.facecam_crop or detect_facecam_crop(
+            media, clip_start, duration, workdir, ffmpeg, settings, warnings
+        )
+        if facecam_box is None:
+            raise ClipperError(
+                "Could not auto-detect the streamer webcam for the split layout. "
+                "Re-run with a manual webcam crop in `x,y,w,h` normalized "
+                "coordinates (for example `0.70,0.55,0.28,0.40`), or use the "
+                "full-frame layout."
+            )
+        facecam_pixels = _facecam_pixels(media, facecam_box)
+        LOG.info(
+            "Split layout clip %s: webcam crop %s px", clip_rank, facecam_pixels
         )
 
     face_path: np.ndarray | None = None
     actual_face_tracking = False
-    if settings.crop_mode == "face" and media.width > media.height * 0.58:
+    if (
+        layout == "full"
+        and settings.crop_mode == "face"
+        and media.width > media.height * 0.58
+    ):
         # A landscape/square source has room for horizontal panning.  For a
         # source already narrower than 9:16, a center crop is the right answer.
         face_path = analyze_face_path(
@@ -2001,7 +2249,8 @@ def render_clip(
                              word_count=candidate.word_count,
                              sentence_start=candidate.sentence_start,
                              sentence_end=candidate.sentence_end),
-            output_path, workdir, ffmpeg, ffprobe, caption_work_file, x_expression, duration,
+            output_path, workdir, ffmpeg, ffprobe, caption_work_file, x_expression,
+            duration, layout=layout, facecam_pixels=facecam_pixels,
         )
         actual_face_tracking = face_path is not None
     except ClipperError as first_error:
@@ -2026,6 +2275,7 @@ def render_clip(
                              sentence_end=candidate.sentence_end),
             output_path, workdir, ffmpeg, ffprobe, caption_work_file,
             "max(0,(in_w-1080)/2)", duration,
+            layout=layout, facecam_pixels=facecam_pixels,
         )
         actual_face_tracking = False
 
@@ -2052,6 +2302,7 @@ def render_clip(
         text=candidate.text,
         llm_reason=candidate.llm_reason,
         face_tracked=actual_face_tracking,
+        layout=layout,
     )
 
 
@@ -2096,6 +2347,12 @@ def create_clips(
         raise ClipperError(f"Clip count must be between 1 and {MAX_CLIP_COUNT}.")
     if settings.model_size not in SUPPORTED_MODELS:
         raise ClipperError(f"Model must be one of {SUPPORTED_MODELS}.")
+    if settings.layout not in SUPPORTED_LAYOUTS:
+        raise ClipperError(f"Layout must be one of {SUPPORTED_LAYOUTS}.")
+    try:
+        settings.facecam_crop = parse_facecam_crop(settings.facecam_crop)
+    except ValueError as exc:
+        raise ClipperError(str(exc)) from exc
 
     output_dir = Path(settings.output_dir).expanduser().resolve()
     try:
@@ -2193,6 +2450,22 @@ def create_clips(
                 "or target duration to get more."
             )
 
+        if settings.layout == "split" and settings.facecam_crop is None:
+            if progress:
+                progress(0.73, "Detecting the streamer webcam…")
+            detected_crop = detect_facecam_crop(
+                media, 0.0, min(30.0, media.duration), work_root,
+                ffmpeg, settings, warnings,
+            )
+            if detected_crop is None:
+                raise ClipperError(
+                    "Could not auto-detect the streamer webcam for the split layout. "
+                    "Re-run with a manual webcam crop in `x,y,w,h` normalized "
+                    "coordinates (for example `0.70,0.55,0.28,0.40`), or use the "
+                    "full-frame layout."
+                )
+            settings.facecam_crop = detected_crop
+
         # Render highest-scoring first.  clip_rank is the score rank, which is
         # also the order shown in the UI.
         manifest_path = output_dir / f"{safe_stem}_{job_id}_manifest.json"
@@ -2232,6 +2505,12 @@ def create_clips(
                     "model_size": settings.model_size,
                     "language": transcript.language,
                     "crop_mode": settings.crop_mode,
+                    "layout": settings.layout,
+                    "facecam_crop": (
+                        [round(v, 4) for v in settings.facecam_crop]
+                        if settings.facecam_crop
+                        else None
+                    ),
                     "burn_captions": settings.burn_captions,
                     "compute_type": settings.compute_type,
                     "ollama_model": settings.ollama_model,
@@ -2257,6 +2536,7 @@ def create_clips(
                         "score": round(clip.score, 1),
                         "score_breakdown": clip.breakdown,
                         "face_tracked": clip.face_tracked,
+                        "layout": clip.layout,
                         "llm_reason": clip.llm_reason,
                         "transcript": clip.text,
                     }
@@ -2339,7 +2619,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--crop", choices=("face", "center"), default="face",
-        help="Vertical crop strategy.",
+        help="Vertical crop strategy for the full-frame layout.",
+    )
+    parser.add_argument(
+        "--layout", choices=SUPPORTED_LAYOUTS, default="full",
+        help=(
+            "full = one full-frame vertical crop; split = streamer webcam on "
+            "top with the gameplay frame below."
+        ),
+    )
+    parser.add_argument(
+        "--facecam-crop", default=None, metavar="X,Y,W,H",
+        help=(
+            "Manual streamer webcam crop for --layout split, in normalized "
+            "0–1 coordinates (e.g. 0.70,0.55,0.28,0.40). Auto-detected when omitted."
+        ),
     )
     parser.add_argument(
         "--no-captions", action="store_true", help="Render without burned-in captions."
@@ -2388,12 +2682,19 @@ def run_cli(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    try:
+        facecam_crop = parse_facecam_crop(args.facecam_crop)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     settings = ClipSettings(
         target_duration=args.duration,
         clip_count=args.clips,
         model_size=args.model,
         language=args.language,
         crop_mode=args.crop,
+        layout=args.layout,
+        facecam_crop=facecam_crop,
         burn_captions=not args.no_captions,
         device_preference=args.device,
         compute_type=args.compute_type,
@@ -2567,7 +2868,29 @@ def launch_ui(args: argparse.Namespace) -> int:
                     crop_mode = gr.Radio(
                         choices=[("Face-aware", "face"), ("Center", "center")],
                         value="face",
-                        label="Vertical reframing",
+                        label="Vertical reframing (full-frame layout)",
+                    )
+                    layout = gr.Radio(
+                        choices=[
+                            ("Full frame", "full"),
+                            ("Split: streamer top / gameplay bottom", "split"),
+                        ],
+                        value="full",
+                        label="Clip layout",
+                        info=(
+                            "Split mirrors gaming Shorts: a streamer webcam crop on "
+                            "top and the full gameplay frame below."
+                        ),
+                    )
+                    facecam_crop = gr.Textbox(
+                        value="",
+                        label="Streamer webcam crop (optional)",
+                        placeholder="0.70,0.55,0.28,0.40",
+                        info=(
+                            "Normalized x,y,w,h of the webcam in the source. "
+                            "Leave empty to auto-detect the face."
+                        ),
+                        lines=1,
                     )
                     burn_captions = gr.Checkbox(
                         value=True, label="Burn in bold captions"
@@ -2631,6 +2954,8 @@ def launch_ui(args: argparse.Namespace) -> int:
             whisper_model: str,
             spoken_language: str,
             reframing: str,
+            clip_layout: str,
+            webcam_crop_text: str,
             captions_enabled: bool,
             whisper_device: str,
             ollama_enabled: bool,
@@ -2654,12 +2979,18 @@ def launch_ui(args: argparse.Namespace) -> int:
                     "",
                 )
             language_value = None if spoken_language in (None, "Auto") else spoken_language
+            try:
+                webcam_crop = parse_facecam_crop(webcam_crop_text)
+            except ValueError as exc:
+                return _ui_error_message(exc), [], [], ""
             settings = ClipSettings(
                 target_duration=int(target_duration),
                 clip_count=int(requested_clips),
                 model_size=whisper_model,
                 language=language_value,
                 crop_mode=reframing,
+                layout=clip_layout or "full",
+                facecam_crop=webcam_crop,
                 burn_captions=bool(captions_enabled),
                 device_preference=whisper_device,
                 ollama_model=(ollama_name.strip() if ollama_enabled and ollama_name else None),
@@ -2732,7 +3063,8 @@ def launch_ui(args: argparse.Namespace) -> int:
             fn=handle_run,
             inputs=[
                 upload, local_path, youtube_url, duration, clip_count, model_size,
-                language, crop_mode, burn_captions, device, use_ollama, ollama_model,
+                language, crop_mode, layout, facecam_crop, burn_captions, device,
+                use_ollama, ollama_model,
             ],
             outputs=[status, gallery, downloads, details],
             api_name="create_clips",

@@ -44,6 +44,7 @@ When you want every feature, run the script locally:
 - **faster-whisper** (`base` or `small`) for word-level speech transcription
 - **FFmpeg / FFprobe** for probing, trimming, reframing, encoding, and burning captions
 - **OpenCV Haar cascades** for optional face-aware horizontal reframing
+- **Split layout** for gaming Shorts: streamer webcam on top, gameplay below
 - **ASS subtitles** with short phrases, bold outlines, and an active-word highlight
 - **NumPy** audio-energy analysis plus a transparent transcript scoring heuristic
 - **Optional Ollama** local LLM reranking (disabled by default)
@@ -232,7 +233,8 @@ The UI lets you:
 
 1. Upload an MP4/MKV/MOV/WebM, paste a local path, or paste a YouTube URL.
 2. Pick a 30, 45, or 60 second target and 1–5 clips.
-3. Choose face-aware or centered reframing.
+3. Choose face-aware or centered reframing, and optionally the split
+   streamer-top / gameplay-bottom layout.
 4. Toggle burned-in captions.
 5. Optionally enable local Ollama reranking.
 6. Preview clips in the gallery and use the gallery download buttons, or
@@ -260,6 +262,19 @@ python app.py --cli --input talk.mp4 --duration 60 --clips 3 --model small
 
 # From a YouTube link (no full video file is saved)
 python app.py --cli --youtube "https://www.youtube.com/watch?v=VIDEO_ID" --clips 3
+
+# Gaming Shorts layout: streamer webcam on top, gameplay below
+python app.py --cli \
+  --youtube "https://www.youtube.com/watch?v=VIDEO_ID" \
+  --layout split \
+  --clips 3
+
+# Split layout with a manual webcam crop (normalized x,y,w,h)
+python app.py --cli \
+  --input stream.mp4 \
+  --layout split \
+  --facecam-crop 0.70,0.55,0.28,0.40 \
+  --clips 3
 
 # Optional local LLM reranking
 ollama serve
@@ -296,6 +311,8 @@ score breakdown, transcript snippet, and the manifest location.
 | `--model {base,small}` | faster-whisper model | `base` |
 | `--language CODE` | Force a language, e.g. `en`, `hi`, `es`; omit to auto-detect | auto |
 | `--crop {face,center}` | Reframing strategy | `face` |
+| `--layout {full,split}` | Full-frame clip, or streamer top / gameplay bottom | `full` |
+| `--facecam-crop X,Y,W,H` | Manual streamer webcam crop for `split`, normalized 0–1 | auto-detect |
 | `--no-captions` | Do not burn captions | captions on |
 | `--device {auto,cpu,cuda}` | Whisper device | `auto` |
 | `--compute-type TYPE` | `auto`, `int8`, `float16`, `int8_float16`, `float32` | `auto` |
@@ -370,6 +387,12 @@ Ollama is unavailable the app logs a warning and continues with heuristics.
   FFmpeg uses a piecewise-linear crop expression for horizontal tracking. If no
   reliable face is found, it falls back to a stable center crop.
 - Vertical sources narrower than 9:16 are center-cropped vertically.
+- **Split layout** (`--layout split`) mirrors gaming Shorts: the streamer webcam
+  fills the top 920 px and the full gameplay frame fills the bottom 1000 px of
+  the 1080×1920 canvas. The webcam region is detected automatically from the
+  most prominent face; if detection fails, pass a manual normalized crop with
+  `--facecam-crop x,y,w,h` (or the matching field in the UI). Captions straddle
+  the seam between the two bands.
 - Captions are generated as ASS at 1080×1920 with a bold font, thick black
   outline, bottom-center safe-zone margin, short phrases (up to 4 words / 20
   characters / 2.8 s), and the currently spoken word highlighted in yellow.
@@ -437,6 +460,13 @@ the initial GPU attempt.
 **Face tracking misses the subject**  
 Haar cascades work best with a clear, front-facing face. Use `--crop center` for
 screen recordings, gameplay, or non-human subjects.
+
+**Split layout says it could not detect the streamer webcam**  
+Auto-detection needs a visible frontal face. Find the webcam's position in the
+source and pass it as normalized `x,y,w,h` coordinates, for example
+`--facecam-crop 0.70,0.55,0.28,0.40`. In the UI, use the **Streamer webcam crop**
+field. Values are fractions of the source width/height, with `0,0` at the
+top-left.
 
 **YouTube link fails**  
 Update yt-dlp with `pip install -U yt-dlp`. Live streams, playlists, private or
