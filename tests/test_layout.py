@@ -86,6 +86,32 @@ class SplitFilterTests(unittest.TestCase):
             self.assertNotIn("vstack", text)
 
 
+class StableFaceClusterTests(unittest.TestCase):
+    def test_prefers_persistent_webcam_over_gameplay_faces(self):
+        detections = []
+        for i in range(20):
+            jitter = (i % 3 - 1) * 0.004
+            detections.append((0.08 + jitter, 0.35 - jitter, 0.10, 0.15))
+            # A smaller static face, such as a scoreboard overlay.
+            detections.append((0.77, 0.10, 0.05, 0.06))
+            # Moving faces inside the gameplay.
+            detections.append((0.30 + 0.02 * i, 0.60 - 0.01 * i, 0.04, 0.06))
+        result = app._stable_face_cluster(detections, 20)
+        self.assertIsNotNone(result)
+        cx, cy, fw, fh = result
+        self.assertAlmostEqual(cx, 0.08, delta=0.02)
+        self.assertAlmostEqual(cy, 0.35, delta=0.02)
+        self.assertAlmostEqual(fw, 0.10, delta=0.02)
+        self.assertAlmostEqual(fh, 0.15, delta=0.02)
+
+    def test_ignores_faces_that_do_not_persist(self):
+        detections = [(0.3, 0.4, 0.1, 0.1), (0.31, 0.41, 0.1, 0.1)]
+        self.assertIsNone(app._stable_face_cluster(detections, 20))
+
+    def test_handles_no_detections(self):
+        self.assertIsNone(app._stable_face_cluster([], 20))
+
+
 class SplitCaptionTests(unittest.TestCase):
     def test_seam_captions_are_positioned(self):
         words = [app.Word(0.2, 0.8, "HELLO"), app.Word(0.9, 1.4, "WORLD")]

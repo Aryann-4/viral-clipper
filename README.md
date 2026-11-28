@@ -389,10 +389,12 @@ Ollama is unavailable the app logs a warning and continues with heuristics.
 - Vertical sources narrower than 9:16 are center-cropped vertically.
 - **Split layout** (`--layout split`) mirrors gaming Shorts: the streamer webcam
   fills the top 920 px and the full gameplay frame fills the bottom 1000 px of
-  the 1080×1920 canvas. The webcam region is detected automatically from the
-  most prominent face; if detection fails, pass a manual normalized crop with
-  `--facecam-crop x,y,w,h` (or the matching field in the UI). Captions straddle
-  the seam between the two bands.
+  the 1080×1920 canvas. The webcam region is detected automatically by tracking
+  the face that stays in a stable screen position across frames (webcam
+  overlays are fixed; in-game faces move). If detection fails or picks the
+  wrong area, pass a manual normalized crop with `--facecam-crop x,y,w,h` (or
+  the matching field in the UI). Captions straddle the seam between the two
+  bands.
 - Captions are generated as ASS at 1080×1920 with a bold font, thick black
   outline, bottom-center safe-zone margin, short phrases (up to 4 words / 20
   characters / 2.8 s), and the currently spoken word highlighted in yellow.

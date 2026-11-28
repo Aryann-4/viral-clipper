@@ -1755,6 +1755,70 @@ def _facecam_pixels(
     return x, y, w, h
 
 
+def _stable_face_cluster(
+    detections: list[tuple[float, float, float, float]],
+    frame_count: int,
+) -> tuple[float, float, float, float] | None:
+    """Return the most persistent, sizable face cluster across frames.
+
+    Webcam overlays keep the streamer's face at a nearly fixed screen position,
+    while faces in the gameplay move around. Clustering by position and size
+    therefore separates the webcam from incidental in-game faces.
+    """
+    if not detections or frame_count <= 0:
+        return None
+    clusters: list[list[tuple[float, float, float, float]]] = []
+    for detection in detections:
+        best_index = -1
+        best_distance = float("inf")
+        for index, samples in enumerate(clusters):
+            mean = np.median(np.asarray(samples, dtype=float), axis=0)
+            dx = abs(detection[0] - mean[0])
+            dy = abs(detection[1] - mean[1])
+            width_ratio = detection[2] / max(mean[2], 1e-6)
+            height_ratio = detection[3] / max(mean[3], 1e-6)
+            if (
+                dx <= 0.05
+                and dy <= 0.05
+                and 0.55 <= width_ratio <= 1.8
+                and 0.55 <= height_ratio <= 1.8
+            ):
+                distance = dx + dy
+                if distance < best_distance:
+                    best_distance = distance
+                    best_index = index
+        if best_index < 0:
+            clusters.append([detection])
+        else:
+            clusters[best_index].append(detection)
+
+    min_count = max(3, int(round(frame_count * 0.12)))
+    best: tuple[float, float, float, float] | None = None
+    best_score = 0.0
+    for samples in clusters:
+        if len(samples) < min_count:
+            continue
+        values = np.asarray(samples, dtype=float)
+        cx, cy, fw, fh = (float(v) for v in np.median(values, axis=0))
+        area = max(fw, 1e-4) * max(fh, 1e-4)
+        spread = float(
+            np.median(np.abs(values[:, 0] - cx) + np.abs(values[:, 1] - cy))
+        )
+        stability = 1.0 / (1.0 + 8.0 * spread)
+        # Slight preference for faces near an edge, where overlays usually sit.
+        edge_distance = min(cx, 1.0 - cx, cy, 1.0 - cy)
+        edge_bonus = 1.0 + 0.25 * max(0.0, 0.18 - edge_distance) / 0.18
+        score = len(samples) * area * stability * edge_bonus
+        LOG.debug(
+            "Face cluster cx=%.3f cy=%.3f w=%.3f h=%.3f count=%d score=%.4f",
+            cx, cy, fw, fh, len(samples), score,
+        )
+        if score > best_score:
+            best_score = score
+            best = (cx, cy, fw, fh)
+    return best
+
+
 def detect_facecam_crop(
     media: MediaInfo,
     start: float,
@@ -1815,58 +1879,55 @@ def detect_facecam_crop(
         warnings.append(warning)
         return None
 
-    centers_x: list[float] = []
-    centers_y: list[float] = []
-    face_widths: list[float] = []
-    face_heights: list[float] = []
+    # Collect every face in every frame, then find the face that stays in a
+    # stable screen position. A webcam overlay is fixed in place, while faces
+    # inside the game move around and produce scattered one-off detections.
+    all_detections: list[tuple[float, float, float, float]] = []
     for frame_file in frame_files:
         frame = cv2.imread(str(frame_file))
         if frame is None:
             continue
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(28, 28)
+            gray, scaleFactor=1.1, minNeighbors=5, minSize=(24, 24)
         )
         if len(faces) == 0:
             continue
         height, width = frame.shape[:2]
-        best = None
-        best_weight = -1.0
         for x, y, w, h in faces:
-            cx = (x + w / 2.0) / max(1, width)
-            cy = (y + h / 2.0) / max(1, height)
-            area = (w * h) / float(max(1, width * height))
-            # Prefer large faces near an edge/corner, where webcam overlays live.
-            edge_bias = 1.0 + 0.35 * max(abs(cx - 0.5), abs(cy - 0.5)) * 2.0
-            weight = area * edge_bias
-            if weight > best_weight:
-                best_weight = weight
-                best = (cx, cy, w / max(1, width), h / max(1, height))
-        if best is not None:
-            centers_x.append(best[0])
-            centers_y.append(best[1])
-            face_widths.append(best[2])
-            face_heights.append(best[3])
+            all_detections.append(
+                (
+                    (x + w / 2.0) / max(1, width),
+                    (y + h / 2.0) / max(1, height),
+                    w / max(1, width),
+                    h / max(1, height),
+                )
+            )
 
-    if len(centers_x) < max(2, len(frame_files) // 10):
-        LOG.info("No reliable webcam face found.")
+    stable = _stable_face_cluster(all_detections, len(frame_files))
+    if stable is None:
+        LOG.info("No stable webcam face found.")
         return None
 
-    cx = float(np.median(centers_x))
-    cy = float(np.median(centers_y))
-    fw = float(np.median(face_widths))
-    fh = float(np.median(face_heights))
+    cx, cy, fw, fh = stable
+    LOG.info(
+        "Stable webcam face at cx=%.3f cy=%.3f fw=%.3f fh=%.3f "
+        "(%d of %d frames)",
+        cx, cy, fw, fh, len(all_detections), len(frame_files),
+    )
 
-    # Expand generously around the face, then force the top band's aspect ratio.
+    # Crop close to head-and-shoulders rather than the whole frame. A wide
+    # crop around a small corner webcam would mostly show gameplay again.
     target_aspect = TARGET_WIDTH / SPLIT_TOP_HEIGHT
-    box_h = min(1.0, max(fh * 3.4, fw * 2.2 / target_aspect))
+    box_h = max(fw * 3.0 / target_aspect, fh * 1.5)
+    box_h = float(np.clip(box_h, 0.14, 0.55))
     box_w = box_h * target_aspect
     if box_w > 1.0:
         box_w = 1.0
         box_h = box_w / target_aspect
-    # Bias downward so shoulders are included instead of only headroom.
+    # Bias slightly downward so shoulders are included instead of headroom.
     box_x = cx - box_w / 2.0
-    box_y = cy - box_h * 0.42
+    box_y = cy - box_h * 0.45
     box_x = float(np.clip(box_x, 0.0, 1.0 - box_w))
     box_y = float(np.clip(box_y, 0.0, 1.0 - box_h))
     LOG.info(
